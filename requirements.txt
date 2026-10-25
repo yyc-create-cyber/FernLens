@@ -1,0 +1,7 @@
+PySide6>=6.6
+numpy
+opencv-python
+
+# 以下为可选依赖（run.bat 会自动尝试安装，失败不影响基本功能）：
+# rawpy     - RAW 解码（DNG/CR2/CR3/NEF/ARW 等）
+# pyopencl  - GPU 加速（需显卡驱动自带 OpenCL：NVIDIA / AMD / Intel 均可）

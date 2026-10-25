@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "active_id": "cabe88589ecc",
+  "apis": [
+    {
+      "id": "cabe88589ecc",
+      "name": "新接口 1",
+      "protocol": "openai_responses",
+      "base_url": "https://api.example.ai/v1",
+      "api_key": "sk-...",
+      "model": "/",
+      "enabled": true
+    }
+  ]
+}

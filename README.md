@@ -15,9 +15,7 @@ run.bat                 :: 自动建虚拟环境 + 装依赖 + 启动
 
 ```bash
 pip install -r requirements.txt
-python main.py                      # 也可把图片路径作为命令行参数
-python tests.py                     # 核心算法自检
-python tests.py --ui                # 追加 UI 冒烟测试（offscreen）
+python main.py                      
 ```
 
 - 打开：Ctrl+O ｜ 保存：Ctrl+S ｜ 重置：Ctrl+R ｜ 对比原图：`\`
@@ -38,10 +36,9 @@ python tests.py --ui                # 追加 UI 冒烟测试（offscreen）
 3. 点击 **「拉取模型」**，程序会调用当前接口的 `/models` 获取可用模型并填入下拉框
    （也可以留空让程序自动选择，或手动输入模型名）；
 4. 点击保存，配置会自动写入 `api.json`。
-5.也可以直接修改配置文件，api.json内已给出一个模板。
 
 之后随时可以点工具栏的 **「AI 接口…」** 修改、添加或删除接口，也可以设置优先使用的接口。
-`api.json` 结构如下（API Key 为明文，请勿分享该文件）：
+`api.json` 结构如下（API Key 为明文，请把它保存在自己的家目录下)
 
 ```json
 {

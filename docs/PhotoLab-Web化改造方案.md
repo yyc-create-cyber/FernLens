@@ -61,7 +61,7 @@ BrowserWindow 加载 UI。**Webview 只加载本地地址**，不加载任何远
 
 ## 3. 现状资产盘点（哪些动、哪些不动）
 
-仓库：`C:\Users\dy\Desktop\gay`（PhotoLab，纯本地 Windows 照片调色器）。
+仓库：`C:\Users\dy\Desktop\photolab`（PhotoLab，纯本地 Windows 照片调色器）。
 
 ### 3.1 冻结区（只许加胶水，不许改逻辑）
 
@@ -89,7 +89,7 @@ BrowserWindow 加载 UI。**Webview 只加载本地地址**，不加载任何远
 ### 3.3 新增目录
 
 ```
-gay/
+photolab/
 ├── core.py  gpu.py  auto.py  tests.py     # 冻结
 ├── server.py                              # 新增：FastAPI 会话/任务/路由
 ├── tests_server.py                        # 新增：API 层测试（TestClient）
@@ -195,7 +195,7 @@ cd frontend && npm install && npm run build          # 产出 frontend/dist（�
 - `preload.cjs`：contextBridge 暴露 `photolabNative`（原生打开/保存对话框 + 落盘）。
   前端检测到该桥即走原生对话框（RAW 用路径打开），否则用浏览器上传/下载。
 - electron-builder：NSIS（`PhotoLab-Setup-1.0.0.exe`，~138MB）+ portable（`PhotoLab-Portable-1.0.0.exe`）；
-  electron-updater 对接 GitHub Releases（nothing1145141/gay），未发布版本时静默。
+  electron-updater 对接 GitHub Releases（nothing1145141/photolab），未发布版本时静默。
 
 ### 6.3 打包环境注意（Windows 无开发者模式时）
 

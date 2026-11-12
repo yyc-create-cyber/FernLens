@@ -13,6 +13,7 @@ import {
 import { aiChat, aiImageEdit, bitmapToDataUrl, bitmapToJpegBlob } from '@/api/ai'
 import type { AiChatMessage, AiContentPart } from '@/api/ai'
 import { TONE_FIELDS, scaleAiAdjustments } from '@/api/types'
+import { PARAM_SENSITIVITY } from '@/lib/aiPrompt'
 import type { Adjustments } from '@/api/types'
 
 type ChatMode = 'chat' | 'adjust' | 'image'
@@ -113,6 +114,7 @@ function systemPrompt(kind: 'chat' | 'adjust'): string {
     '你是 PhotoLab 的调色助手。根据图片和用户要求，输出一个严格的 JSON 对象。',
     '格式：{"note":"一句话说明","adjustments":{...}}。只输出 JSON，不要 markdown，不要解释。',
     `adjustments 可用字段：${TONE_FIELDS.join(', ')}；exposure 范围 -5..5，其余 -100..100，blackwhite 0..100。`,
+    PARAM_SENSITIVITY,
     'curves: {"master"|"red"|"green"|"blue": [[x,y], ...]}，x/y 取 0..1。',
     'wheels: {"shadows"|"midtones"|"highlights"|"global": {"hue":0..360,"saturation":-100..100,"luminance":-100..100}}。',
     'pickers: [{"hue":0..360,"span":5..180,"hue_shift":-60..60,"saturation":-100..100,"luminance":-100..100}]。',
@@ -120,6 +122,7 @@ function systemPrompt(kind: 'chat' | 'adjust'): string {
     '曝光通常不超过 ±0.5 EV；曲线用轻微 S（中点位移 ≤0.12），不要四个通道全给强曲线；',
     '颜色分级只做点睛（单轮 saturation/luminance 多在 5~20）；同一影调区间不要叠加三种以上手段；',
     '没有要求就留 0，宁可少一分也不要过度后期。',
+    `AI 调整强度当前为 ${store.aiConfig.strength.toFixed(2)}（你返回的所有数值会先乘这个系数再应用）。`,
     `当前参数：${current}`,
   ].join('\n')
 }

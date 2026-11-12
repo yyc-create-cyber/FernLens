@@ -55,10 +55,12 @@ function displayFrame(): { bmp: ImageBitmap; w: number; h: number } | null {
     : !store.fullFrame ? store.previewFrame
       : (store.fullFrame.rid >= store.previewFrame.rid ? store.fullFrame : store.previewFrame)
   if (!f) return null
-  // 几何一律用「全尺寸帧」的尺寸（没有时退回本帧尺寸）：拖动中的草稿帧分辨率更低，
-  // 但必须拉伸到同一矩形，否则画面会在草稿帧到达时突然缩小、松手后再跳回去
-  const gw = store.geomW || f.bmp.width
-  const gh = store.geomH || f.bmp.height
+  // 几何基准 = 源图像素尺寸（打开/裁剪/旋转后更新），不能用渲染帧的宽度：
+  // 渲染帧按 viewEdge 分级（1200/2400/3200…），拿帧宽当基准会让「适应窗口」
+  // 的比例随每次请求的分辨率跳变——打开图章/蒙版后画面会突然放大或缩小。
+  // 草稿帧分辨率更低，也必须拉伸到同一矩形，否则画面会在草稿帧到达时跳动。
+  const gw = store.width || f.bmp.width
+  const gh = store.height || f.bmp.height
   return { bmp: f.bmp, w: gw, h: gh }
 }
 

@@ -7,7 +7,10 @@
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win"
+    "dist": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:mac:arm64": "electron-builder --mac --arm64",
+    "dist:mac:x64": "electron-builder --mac --x64"
   },
   "author": "nothing1145141",
   "license": "SEE LICENSE IN ../LICENSE",
@@ -33,6 +36,27 @@
       "target": [
         { "target": "nsis", "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "mac": {
+      "icon": "../build/icon.png",
+      "category": "public.app-category.photography",
+      "target": ["dmg", "zip"],
+      "artifactName": "PhotoLab-${version}-${arch}.${ext}",
+      "darkModeSupport": true,
+      "gatekeeperAssess": false,
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSHighResolutionCapable": true,
+        "NSRequiresAquaSystemAppearance": false
+      }
+    },
+    "dmg": {
+      "title": "PhotoLab ${version}",
+      "artifactName": "PhotoLab-Setup-${version}-${arch}.${ext}",
+      "contents": [
+        { "x": 130, "y": 220, "type": "file" },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
       ]
     },
     "nsis": {

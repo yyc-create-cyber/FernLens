@@ -1,0 +1,70 @@
+name: mac-build
+
+# 没有 Mac 也能出 macOS 包：手动触发后从 GitHub Actions 的 Artifacts 下载 dmg。
+# macOS 构建必须在 macOS runner 上完成（PyInstaller 不能交叉编译，dmg 需要 hdiutil）。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14      # Apple Silicon (arm64)
+            arch: arm64
+          - runner: macos-13      # Intel (x64)
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python deps
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          # PySide6 只用于旧版桌面 UI / UI 测试，sidecar 不 import，跳过省时间
+          grep -v -i '^PySide6' requirements.txt > /tmp/req.txt
+          python -m pip install -r /tmp/req.txt
+          python -m pip install rawpy onnxruntime pyinstaller
+          python -m pip install pyopencl || echo "pyopencl 安装失败：GPU 关闭，回退 CPU"
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+      - name: Build Python sidecar
+        run: |
+          . .venv/bin/activate
+          pyinstaller build/photolab-server.spec --noconfirm --distpath backend-dist
+          chmod 755 backend-dist/photolab-server/photolab-server
+
+      - name: Build .app and dmg
+        run: |
+          cd desktop
+          npm install
+          npx electron-builder --mac --${{ matrix.arch }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhotoLab-mac-${{ matrix.arch }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+          if-no-files-found: error

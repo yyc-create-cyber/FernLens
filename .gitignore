@@ -12,6 +12,11 @@ frontend/node_modules/
 # Distribution / packaging
 .Python
 build/*
+# 打包资产（被上面的 build/* 误伤，需要显式放行；CI 与 electron-builder 依赖这些文件）
+!build/photolab-server.spec
+!build/icon.ico
+!build/icon.png
+!build/entitlements.mac.plist
 develop-eggs/
 dist/
 downloads/
@@ -238,3 +243,14 @@ models/
 !build/photolab-server.spec
 !build/icon.ico
 !frontend/src/lib/
+
+# 本地临时文件 / 工具残留（不入库）
+tmp_*
+.cowork-temp/
+.trash/
+browser/
+desktop/release.bak-*/
+exec-approvals.json
+ps-exe.txt
+README.docx
+/CurveEditor.vue

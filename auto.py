@@ -1,9 +1,12 @@
-"""PhotoLab 自动调色 + AI 蒙版：规则版 + AI 版。
+"""PhotoLab 自动调色：规则版 + AI 版。
 
 - 「自动」：纯本地规则（灰世界白平衡 + 直方图自动色阶），瞬时、可预期；
-- 「AI 调色」：把降采样图与统计数据发给视觉大模型，由它返回参数 JSON；
-- 「AI 蒙版」：让视觉大模型按网格分割图像（主体/人物/背景/天空），
-  返回 0/1 网格，由 core 渲染成软边蒙版。
+- 「AI 调色」：把压缩后的图像（最长边 1280、JPEG 90，过大再压）与统计数据
+  发给视觉大模型，由它返回参数 JSON；提示词要求「克制、可预期」的调整，
+  默认只做必要修正 + 轻微风格化，可附带用户的精修要求（intent）。
+  返回值再按 strength（0..1，默认 0.6）统一缩放，避免模型给过量参数导致过度后期。
+
+AI 蒙版不走这里：蒙版识别只保留本地像素级引擎（见 segment.py）。
 
 端点为任意 OpenAI 兼容 chat/completions 服务，配置解析顺序：
     1. 前端「AI 设置」界面传入的 {base_url, api_key, model}
@@ -38,6 +41,10 @@ _SCALAR_FIELDS = {
     "vibrance": (-100.0, 100.0),
     "blackwhite": (0.0, 100.0),
 }
+
+# AI 返回参数的默认强度（0=不动，1=完全按模型给的量）。0.6 让模型的
+# 数值落到画面时明显更收敛，避免「一键过度后期」；用户可在 AI 设置里调。
+AI_DEFAULT_STRENGTH = 0.6
 
 
 def _clamp(v, lo, hi) -> float:
@@ -201,14 +208,20 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-def sanitize_ai_params(data: dict) -> dict:
-    """把模型返回的参数钳制到合法范围，丢弃非法/无效果的字段。"""
+def sanitize_ai_params(data: dict, strength: float = AI_DEFAULT_STRENGTH) -> dict:
+    """把模型返回的参数钳制到合法范围，丢弃非法/无效果的字段。
+
+    strength（0..1）对全部「幅度」类字段做统一缩放：标量直接乘，曲线向
+    恒等线收缩，色轮/取色器的饱和度与明度乘，色相本身不变。这样即使模型
+    仍然给了偏大的数值，落到画面上也是克制的。
+    """
     if not isinstance(data, dict):
         return {}
+    gain = _clamp(strength, 0.0, 1.0)
     out: dict = {}
     for name, (lo, hi) in _SCALAR_FIELDS.items():
         if name in data and _finite(data[name]):
-            v = _clamp(data[name], lo, hi)
+            v = _clamp(data[name], lo, hi) * gain
             if abs(v) > 0.4:
                 out[name] = round(v, 2)
 
@@ -223,7 +236,11 @@ def sanitize_ai_params(data: dict) -> dict:
                 norm = [(float(x), float(y)) for x, y in pts[:6]]
                 if not all(np.isfinite(x) and np.isfinite(y) for x, y in norm):
                     continue
-                sp = core.sanitize_points(norm)
+                # 曲线向恒等线收缩：y' = x + (y - x) * gain
+                scaled = [(x, x + (y - x) * gain) for x, y in norm]
+                if all(abs(y - x) < 1e-4 for x, y in scaled):
+                    continue          # 缩放后已退化成对角线，视同不调整
+                sp = core.sanitize_points(scaled)
             except Exception:
                 continue
             if [tuple(p) for p in sp] != core.default_curves()[ch]:
@@ -242,8 +259,8 @@ def sanitize_ai_params(data: dict) -> dict:
             if not all(_finite(v) for v in raw):     # NaN/Infinity 直接丢弃
                 continue
             try:
-                sat = _clamp(raw[1], -100, 100)
-                lum_v = _clamp(raw[2], -100, 100)
+                sat = _clamp(raw[1], -100, 100) * gain
+                lum_v = _clamp(raw[2], -100, 100) * gain
                 hue = float(raw[0]) % 360.0
             except Exception:
                 continue
@@ -266,9 +283,9 @@ def sanitize_ai_params(data: dict) -> dict:
             try:
                 hue = float(raw[0]) % 360.0
                 span = _clamp(raw[1], 5, 180)
-                shift = _clamp(raw[2], -60, 60)
-                sat = _clamp(raw[3], -100, 100)
-                lum_v = _clamp(raw[4], -100, 100)
+                shift = _clamp(raw[2], -60, 60) * gain
+                sat = _clamp(raw[3], -100, 100) * gain
+                lum_v = _clamp(raw[4], -100, 100) * gain
             except Exception:
                 continue
             if abs(shift) > 0.4 or abs(sat) > 0.4 or abs(lum_v) > 0.4:
@@ -297,16 +314,49 @@ def _stats_text(rgb8: np.ndarray) -> str:
             f"平均彩度={chroma:.3f}")
 
 
-def _build_messages(rgb8: np.ndarray) -> list:
-    small = core.downscale_max_edge(rgb8, 1024)
-    ok, buf = _encode_jpeg(small)
-    data_url = "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+def _build_messages(rgb8: np.ndarray, intent: str = "") -> list:
+    data_url = _image_data_url(rgb8)
+    want = intent.strip()[:600]
+    if want:
+        intent_block = (
+            "【用户要求（最高优先级，必须明显体现）】\n"
+            + want + "\n\n"
+        )
+    else:
+        intent_block = (
+            "【用户要求】\n未指定。请自己判断题材、光线与色彩问题，选定一个"
+            "最有说服力的风格方向并做到位。\n\n"
+        )
     prompt = (
-        "你是专业照片调色师。根据图像与统计数据，输出 JSON 调整参数。\n\n"
-        "可用字段（全部可选，省略=0/不变）：\n"
+        "你是资深商业修图师与调色师。请把这张照片整理得干净、自然、可信，"
+        "保留原片的光线与质感，只做真正需要的那部分调整。\n\n"
+        + intent_block
+        + "【核心原则：克制】\n"
+        "调得好不等于调得多。宁可少一分，也不要过度后期。任何一项改动都应该能"
+        "说出「为什么必须改」，说不出就留 0。\n\n"
+        "【幅度标尺】\n"
+        "1. 常规项（白平衡/对比/高光/阴影/白色/黑色/清晰度/自然饱和度）多在 5~20，"
+        "确实有问题时才到 25~35，极少超过 40。\n"
+        "2. 曝光调整幅度（EV）通常不超过 ±0.5，明显欠曝/过曝时最多 ±1.0；"
+        "线性亮度 p50 低于 0.12 视为明显欠曝、高于 0.55 视为明显过曝。\n"
+        "3. 饱和度/自然饱和度单独调整即可，另一个留 0；清晰度/去朦胧一般不超过 20。\n"
+        "4. 曲线优先用 master 的轻微 S 曲线（中点位移不超过 0.12），"
+        "需要偏色时再动单通道；不要四个通道全给强曲线。\n"
+        "5. 颜色分级只做点睛：单个色轮的 saturation/luminance 多在 5~20，"
+        "全局色轮更小；不要同时给阴影、中间调、高光三个大额偏移。\n"
+        "6. 取色器只在有明确目标色（如天空、肤色、植被）时使用，最多 2 个，"
+        "hue_shift 通常不超过 25。\n"
+        "7. 同一影调区间不要叠加三种以上手段（例如曲线压暗 + 阴影压暗 + 色轮压暗）。\n"
+        "8. 除用户明确要求强风格外，整体观感应仍然像这张照片本身；"
+        "肤色不许发脏、发绿、发橙，高光与暗部两端各留一点余量，不要压死。\n"
+        "9. 只有用户明确要求，或画面确实适合黑白时，才使用 blackwhite（0..100，"
+        "一般不整幅拉满）。\n"
+        "10. 用户要求与「克制」冲突时，以用户要求为准，但仍按最小必要幅度去满足。\n"
+        "11. 输出前自检：逐项问「这个数值会不会太猛」，把可疑项砍掉一半再输出。\n\n"
+        "【可用字段】（全部可选，省略=0/不变）\n"
         '- 标量: temperature/tint (-100..100)，exposure (-5..5 EV)，'
         "contrast/highlights/shadows/whites/blacks/saturation/vibrance (-100..100)，"
-        "blackwhite (0..100，仅当图像确实适合黑白)\n"
+        "blackwhite (0..100)\n"
         '- "curves": {"master"|"red"|"green"|"blue": [[x,y],...]}，每通道 2~5 个控制点，'
         "x∈[0,1] 严格递增、y∈[0,1]，首点 x=0、末点 x=1\n"
         '- "wheels": {"shadows"|"midtones"|"highlights"|"global": '
@@ -314,9 +364,8 @@ def _build_messages(rgb8: np.ndarray) -> list:
         '- "pickers": [{"hue":0..360,"span":5..180,"hue_shift":-60..60,'
         '"saturation":-100..100,"luminance":-100..100}]，最多 4 个，'
         "用于对特定色相做局部调整\n"
-        '- "note": 一句话说明调色思路（中文）\n\n'
-        "原则：白平衡校正偏色但保留日落/灯光等有意的暖调；曝光使中位数亮度约 0.42"
-        "（线性）；整体自然耐看、不过度，宁可保守；只输出 JSON，不要 markdown。\n\n"
+        '- "note": 一句话说明精修思路（中文）\n\n'
+        "【输出】只输出一个 JSON 对象，不要 markdown、不要解释。\n\n"
         + _stats_text(rgb8)
     )
     return [{"role": "user", "content": [
@@ -334,188 +383,48 @@ def _encode_jpeg(rgb8: np.ndarray, quality: int = 88):
     return ok, buf.tobytes()
 
 
+# 上传给视觉模型的图像：先降采样再 JPEG 压缩；超过上限则逐次降低尺寸/质量。
+_AI_IMAGE_MAX_EDGE = 1280
+_AI_IMAGE_QUALITY = 90
+_AI_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _image_data_url(rgb8: np.ndarray, max_edge: int = _AI_IMAGE_MAX_EDGE,
+                    quality: int = _AI_IMAGE_QUALITY) -> str:
+    """压缩后转 data URL：直出 JPEG，不传原图，控制请求体大小。"""
+    edge, q = int(max_edge), int(quality)
+    while True:
+        small = core.downscale_max_edge(rgb8, edge)
+        ok, buf = _encode_jpeg(small, q)
+        if len(buf) <= _AI_IMAGE_MAX_BYTES or edge <= 640:
+            break
+        edge = max(640, int(edge * 0.75))
+        q = max(72, q - 6)
+    return "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+
+
 def suggest_ai(rgb8: np.ndarray, config: dict | None = None,
-               timeout: int = 90) -> tuple:
-    """AI 自动调色：返回 (参数字典, 说明, 使用的模型描述)。
+               timeout: int = 90, intent: str = "",
+               strength: float = AI_DEFAULT_STRENGTH) -> tuple:
+    """AI 精修：返回 (参数字典, 说明, 使用的模型描述)。
 
     config 为前端「AI 设置」传入的 {base_url, api_key, model}，缺省回退
-    环境变量；两者都没有时抛 RuntimeError。
+    环境变量；两者都没有时抛 RuntimeError。intent 是用户填写的精修要求
+    （如「暖调黄昏电影感」），为空时由模型自行判断风格。strength 统一缩放
+    模型给出的幅度（默认 0.6），越小越克制。
     """
     cfg = resolve_config(config)
     if cfg is None:
         raise _no_config_error()
     base, key, model = cfg
-    messages = _build_messages(rgb8)
+    messages = _build_messages(rgb8, intent)
     try:
         text = _chat(base, key, model, messages, timeout=timeout)
         raw = _extract_json(text)
     except ValueError as exc:
         raise RuntimeError(f"{model}: {exc}") from exc
     note = str(raw.get("note", "")).strip()[:100]
-    params = sanitize_ai_params(raw)
+    params = sanitize_ai_params(raw, strength)
     if not params:
         raise RuntimeError(f"{model}: 返回参数为空")
     return params, note, f"{model}@{base}"
-
-
-# ======================================================================
-# 3. AI 蒙版：视觉大模型网格分割（主体 / 人物 / 背景 / 天空）
-# ======================================================================
-
-# 目标 -> (中文名, 提示词中的定义)
-AI_MASK_TARGETS = {
-    "subject": ("主体", "画面中最主要、最突出的拍摄主体（人物、动物、车辆、"
-                        "建筑、静物等），即摄影师想突出表现的对象；不包括背景环境"),
-    "person": ("人物", "所有出现的人物（脸部与身体，含多人、远景人物）；"
-                       "画面中没有任何人时全部填 '0'"),
-    "background": ("背景", "拍摄主体之外的背景环境（地面、墙面、植物、"
-                           "远处景物等一切非主体内容），与主体互补"),
-    "sky": ("天空", "天空区域（蓝天、白云、晚霞、星空等可见天空）；"
-                    "没有天空（室内/特写）时全部填 '0'"),
-}
-
-# 分辨率取舍：网格越细边界越准，但视觉模型在过细网格上错误率上升。
-# 96 为实测折中（4:3 横幅约 96×72），配合连通域清理与羽化后边界平滑；
-# 32~48 的粗网格在细目标（人物四肢、树枝间天空）上锯齿明显。
-_GRID_LONG_EDGE = 96
-
-
-def _seg_grid_dims(rgb8: np.ndarray, long_edge: int = _GRID_LONG_EDGE) -> tuple:
-    """按图像宽高比规划网格 (gw, gh)，长边固定、格子接近正方形。"""
-    h, w = rgb8.shape[:2]
-    if w >= h:
-        gw, gh = long_edge, max(4, round(h / w * long_edge))
-    else:
-        gw, gh = max(4, round(w / h * long_edge)), long_edge
-    return gw, gh
-
-
-def _cell01(x) -> str:
-    """列表行里的单元格 -> '0'/'1'（数字、布尔、"1"/"0" 字符串均可；坏值为 0）。"""
-    try:
-        return "1" if float(x) >= 0.5 else "0"
-    except (TypeError, ValueError):
-        return "0"
-
-
-def _parse_grid(raw, gw: int, gh: int) -> list:
-    """从模型回复中稳健解析 0/1 网格 -> ['0101...', ...] 共 gh 行、每行 gw 字符。
-
-    容忍：markdown 围栏（调用方已剥）、行内空格/逗号、数字列表、行数/列数
-    轻微不齐（截断补 0）。行数不足一半视为失败。
-    """
-    rows = None
-    if isinstance(raw, dict):
-        for k in ("rows", "grid", "mask"):
-            v = raw.get(k)
-            if isinstance(v, list) and v:
-                rows = v
-                break
-    elif isinstance(raw, list) and raw:
-        rows = raw
-    if not rows:
-        raise ValueError("回复中没有网格数据")
-    clean = []
-    for r in rows:
-        if isinstance(r, (list, tuple)):         # 容忍 0/1 数字（或 "0"/"1"）列表
-            r = "".join(_cell01(x) for x in r)
-        if not isinstance(r, str):
-            continue
-        s = "".join(ch for ch in r if ch in "01")
-        if s:
-            clean.append(s)
-    if len(clean) < max(2, gh // 2):
-        raise ValueError(f"网格行数不足（收到 {len(clean)} 行，需要 {gh}）")
-    out = [r[:gw].ljust(gw, "0") for r in clean[:gh]]
-    while len(out) < gh:
-        out.append("0" * gw)
-    return out
-
-
-_GRID_MIN_AREA = 3      # 面积小于此值的碎片/小孔直接清理（网格通常 48×36，1~2 格视为噪声）
-
-
-def _cleanup_grid(rows: list) -> list:
-    """网格级清理：去小连通域（碎点）+ 填不贴边的小孔。
-
-    用连通域而非形态学：开/闭运算的边框语义在图像边缘不一致（cv2 腐蚀默认
-    边框按极大值填充，贴边的孤立点删不掉；置 0 又会啃掉贴边的正常区域，
-    而天空/背景蒙版必然贴边）。连通域过滤对任意位置行为一致。
-    """
-    import cv2
-    arr = core.grid_to_array(rows, len(rows[0]) if rows else 0, len(rows))
-    if arr.size == 0 or float(arr.max()) == 0.0:
-        return core.array_to_grid(arr)
-    u8 = (arr >= 0.5).astype(np.uint8)
-    h, w = u8.shape
-    # 1) 去小连通域（孤点/碎块）
-    n, lab, stats, _ = cv2.connectedComponentsWithStats(u8, connectivity=8)
-    for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] < _GRID_MIN_AREA:
-            u8[lab == i] = 0
-    # 2) 填不贴边的小孔（背景连通域面积小且不接触图像边缘 -> 视为孔洞）
-    inv = (u8 == 0).astype(np.uint8)
-    n2, lab2, stats2, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
-    for i in range(1, n2):
-        x, y, cw, ch, area = (int(stats2[i, j]) for j in range(5))
-        touches = x == 0 or y == 0 or x + cw >= w or y + ch >= h
-        if area < _GRID_MIN_AREA and not touches:
-            u8[lab2 == i] = 1
-    return core.array_to_grid(u8.astype(np.float32))
-
-
-def _build_seg_messages(rgb8: np.ndarray, target: str, gw: int, gh: int) -> list:
-    if target not in AI_MASK_TARGETS:
-        raise ValueError(f"未知的 AI 蒙版目标：{target}")
-    label, define = AI_MASK_TARGETS[target]
-    small = core.downscale_max_edge(rgb8, 768)
-    ok, buf = _encode_jpeg(small)
-    data_url = "data:image/jpeg;base64," + base64.b64encode(buf).decode()
-    prompt = (
-        "你是图像分割助手。任务：把图像划分为 "
-        f"{gw} 列 × {gh} 行 的网格，逐格判断其中心是否属于【{label}】。\n"
-        f"目标定义：{define}。\n\n"
-        "做法：先通读全图、确定目标的整体范围；再从第一行到最后一行、每行从左到右"
-        "逐格判断。边界格按格子中心点是否落在目标内判断；不要整行照抄上一行，"
-        "也不要跳行。\n\n"
-        "只输出 JSON（不要 markdown、不要解释）：\n"
-        '{"rows": ["..", "..", ...]}\n'
-        f"rows 共 {gh} 个字符串，每个长度恰好 {gw}，仅含字符 '0' 或 '1'："
-        "'1' = 该格属于目标，'0' = 不属于。\n"
-        "画面中没有目标时输出全 '0'。"
-    )
-    return [{"role": "user", "content": [
-        {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": data_url}},
-    ]}]
-
-
-def segment_ai(rgb8: np.ndarray, target: str, config: dict | None = None,
-               timeout: int = 180) -> dict:
-    """AI 网格分割：返回 {target, grid, width, height, model}。
-
-    grid 是 ['0101...', ...]（每行 width 个字符、共 height 行），交给
-    MaskState(kind='ai') 后由 core 渲染成软边蒙版。
-    画面中未识别到目标时抛 ValueError（区别于网络/模型错误的 RuntimeError）。
-    """
-    cfg = resolve_config(config)
-    if cfg is None:
-        raise _no_config_error()
-    base, key, model = cfg
-    gw, gh = _seg_grid_dims(rgb8)
-    messages = _build_seg_messages(rgb8, target, gw, gh)
-    # 网格本身即输出预算：96×72 ≈ 7k 字符，再留 JSON 结构与说明余量
-    max_tokens = min(16000, gw * gh * 2 + 1024)
-    try:
-        text = _chat(base, key, model, messages, timeout=timeout,
-                     max_tokens=max_tokens, temperature=0.1)
-        raw = _extract_json(text)
-        rows = _parse_grid(raw, gw, gh)
-    except ValueError as exc:
-        raise RuntimeError(f"{model}: {exc}") from exc
-    rows = _cleanup_grid(rows)
-    label = AI_MASK_TARGETS[target][0]
-    if core.grid_to_array(rows, gw, gh).max() < 0.5:
-        raise ValueError(f"画面中未识别到「{label}」")
-    return {"target": target, "grid": rows, "width": gw, "height": gh,
-            "model": f"{model}@{base}"}

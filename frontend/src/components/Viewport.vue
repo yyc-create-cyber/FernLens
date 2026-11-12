@@ -3,14 +3,17 @@
  *  行为对照旧 PreviewWidget 与 LR：
  *  - 线性渐变 = LR 原版：三条垂直线（起点/中心/终点），渐变沿轴投影、垂直方向
  *    无限延伸（与 core._linear_mask 语义一致）；拖端线移动、拖中线整体平移。
- *  - 画笔：编辑中显示低透明度红色涂刷区域（不遮挡画面）+ 光标圈；O 键开关叠加。
- *  - 未选中的蒙版只显示编号 pin（LR 式）。
+ *  - 画笔：正在涂/悬停时显示低透明度红色涂刷区域 + 光标圈；O 键开关叠加。
+ *  - 未选中的蒙版只显示编号 pin（LR 式）；AI 蒙版红色叠加改悬停/刚创建时短显。
  *  - 径向：中心/长轴/短轴缩放/旋转手柄。
  *  缩放平移/快捷键对照旧 PreviewWidget：0/1/+/-、双击适应、滚轮以光标为中心。 */
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useEditor, imagePicked, setStampSource, applyStampAt,
          maskGeometryChanged, maskGeometryCommitted, brushStrokeCommitted,
-         constrainCropRect, setLinearMaskAngle } from '@/stores/editor'
+         constrainCropRect, setLinearMaskAngle,
+         maskOverlayVisible, setMaskHover, revealMaskOverlay,
+         setViewEdge, requestDetail } from '@/stores/editor'
+import Icon from '@/components/Icon'
 import type { MaskState } from '@/api/types'
 import type { RectNorm } from '@/api/client'
 
@@ -19,6 +22,7 @@ const wrap = ref<HTMLDivElement | null>(null)
 const canvas = ref<HTMLCanvasElement | null>(null)
 
 const view = reactive({ manual: false, zoom: 1, x: 0, y: 0 })
+const zoomPct = ref(100)
 const MIN_ZOOM = 0.02
 const MAX_ZOOM = 32
 
@@ -51,7 +55,11 @@ function displayFrame(): { bmp: ImageBitmap; w: number; h: number } | null {
     : !store.fullFrame ? store.previewFrame
       : (store.fullFrame.rid >= store.previewFrame.rid ? store.fullFrame : store.previewFrame)
   if (!f) return null
-  return { bmp: f.bmp, w: f.bmp.width, h: f.bmp.height }
+  // 几何一律用「全尺寸帧」的尺寸（没有时退回本帧尺寸）：拖动中的草稿帧分辨率更低，
+  // 但必须拉伸到同一矩形，否则画面会在草稿帧到达时突然缩小、松手后再跳回去
+  const gw = store.geomW || f.bmp.width
+  const gh = store.geomH || f.bmp.height
+  return { bmp: f.bmp, w: gw, h: gh }
 }
 
 function fitScale(): number {
@@ -142,6 +150,9 @@ function maskPinPoint(m: MaskState, d: { w: number; h: number }): { x: number; y
 const aiCanvasCache = new WeakMap<object, { sig: string; canvas: HTMLCanvasElement }>()
 const pngImageCache = new Map<string, HTMLImageElement>()
 
+/** 红色叠加强度（alpha）：0.30 → 0.50，小模型硬边蒙版也能看清边界。 */
+const TINT_ALPHA = 128
+
 /** 任意掩码来源 -> 红色着色画布（掩码亮度 -> alpha）。 */
 function tintMask(src: CanvasImageSource, w: number, h: number): HTMLCanvasElement {
   const c = document.createElement('canvas')
@@ -153,9 +164,9 @@ function tintMask(src: CanvasImageSource, w: number, h: number): HTMLCanvasEleme
   for (let k = 0; k < w * h; k++) {
     const v = data.data[k * 4]
     data.data[k * 4] = 255
-    data.data[k * 4 + 1] = 64
-    data.data[k * 4 + 2] = 64
-    data.data[k * 4 + 3] = Math.round(v / 255 * 77)   // ≈ 0.30 透明度
+    data.data[k * 4 + 1] = 56
+    data.data[k * 4 + 2] = 56
+    data.data[k * 4 + 3] = Math.round(v / 255 * TINT_ALPHA)
   }
   ctx.putImageData(data, 0, 0)
   return c
@@ -196,8 +207,8 @@ function aiMaskCanvas(m: MaskState): HTMLCanvasElement | null {
     for (let i = 0; i < m.grid_w; i++) {
       const k = (j * m.grid_w + i) * 4
       if (row[i] === '1') {
-        img.data[k] = 255; img.data[k + 1] = 64; img.data[k + 2] = 64
-        img.data[k + 3] = 77        // ≈ 0.30 透明度，与画笔叠加一致
+        img.data[k] = 255; img.data[k + 1] = 56; img.data[k + 2] = 56
+        img.data[k + 3] = TINT_ALPHA        // ≈ 0.50，与像素级涂色一致
       }
     }
   }
@@ -239,7 +250,8 @@ function drawMaskOverlay(ctx: CanvasRenderingContext2D, d: { w: number; h: numbe
     const m = masks[i]
     if (!m.enabled) continue
     const selected = i === store.maskSelected && store.editMode === 'mask'
-    const showOverlay = selected && store.maskOverlay
+    const showOverlay = selected && store.maskOverlay          // 几何手柄：选中即可见
+    const showTint = selected && maskOverlayVisible()          // 红色涂色：悬停/预览时短显
 
     if (m.kind === 'linear') {
       if (!showOverlay) { drawPin(ctx, i, maskPinPoint(m, d)); continue }
@@ -281,8 +293,8 @@ function drawMaskOverlay(ctx: CanvasRenderingContext2D, d: { w: number; h: numbe
       drawHandle(ctx, shortP.x, shortP.y, '#4a9eff')
       drawHandle(ctx, rotP.x, rotP.y, '#f0a030')
     } else if (m.kind === 'ai') {
-      // AI 蒙版：编辑中把识别区域以红色半透明叠加（网格放大即软边预览）
-      if (showOverlay) {
+      // AI 蒙版：悬停蒙版条目/刚创建时短显红色叠加（网格放大即软边预览）
+      if (showTint) {
         const src = aiMaskCanvas(m)
         if (src) {
           ctx.save()
@@ -294,14 +306,14 @@ function drawMaskOverlay(ctx: CanvasRenderingContext2D, d: { w: number; h: numbe
           ctx.restore()
         }
       }
-      if (!selected || !store.maskOverlay) drawPin(ctx, i, maskPinPoint(m, d))
+      if (!showTint) drawPin(ctx, i, maskPinPoint(m, d))
     } else {
-      // 画笔：编辑中显示实际涂刷区域（低透明度，不遮挡画面）
-      if (showOverlay && m.strokes.length) {
+      // 画笔：正在涂/悬停时显示实际涂刷区域（低透明度，不遮挡画面）
+      if (showTint && m.strokes.length) {
         const radius = m.size / 100 * shortSide(d) * 0.5
         ctx.save()
         clipToImage(ctx, d)
-        ctx.strokeStyle = 'rgba(255,64,64,0.30)'
+        ctx.strokeStyle = 'rgba(255,56,56,0.42)'
         ctx.lineCap = 'round'
         ctx.lineJoin = 'round'
         ctx.lineWidth = Math.max(3, radius * 2 * z)
@@ -321,13 +333,13 @@ function drawMaskOverlay(ctx: CanvasRenderingContext2D, d: { w: number; h: numbe
         ctx.restore()
       }
       if (selected) {
-        if (mouseImg && store.maskOverlay) {
+        if (mouseImg && showTint) {
           const p = imgToScreen(mouseImg.x, mouseImg.y)
           const r = (m.size / 100 * shortSide(d) * 0.5) * z
           ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(3, r), 0, Math.PI * 2)
           ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1.2; ctx.stroke()
         }
-        if (!store.maskOverlay && m.strokes.length) drawPin(ctx, i, maskPinPoint(m, d))
+        if (!showTint && m.strokes.length) drawPin(ctx, i, maskPinPoint(m, d))
       } else {
         drawPin(ctx, i, maskPinPoint(m, d))
       }
@@ -415,6 +427,16 @@ function applyCropDrag(handle: string, orig: CropRect, dxImg: number, dyImg: num
 }
 
 // ------------------------------------------------------------ 绘制
+/** 告诉渲染调度层：屏幕现在真正需要多少像素（窗口尺寸 × DPR × 放大倍数）。 */
+function reportViewEdge(z: number, cw: number, ch: number, dpr: number): void {
+  const fit = fitScale()
+  const ratio = Math.max(1, z / Math.max(fit, 1e-6))   // 相对“适应窗口”的放大倍数
+  let need = Math.max(cw, ch) * dpr * ratio
+  const srcLong = Math.max(store.width, store.height)
+  if (srcLong > 0) need = Math.min(need, srcLong)
+  setViewEdge(need)
+}
+
 function redraw(): void {
   const cv = canvas.value
   const el = wrap.value
@@ -428,13 +450,17 @@ function redraw(): void {
   }
   const ctx = cv.getContext('2d')!
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.fillStyle = '#1a1a1a'
+  ctx.fillStyle = '#0a0c10'
   ctx.fillRect(0, 0, cw, ch)
   const d = displayFrame()
   if (!d) return
   const { z, ox, oy } = curTransform()
 
-  ctx.imageSmoothingEnabled = z < 2
+  zoomPct.value = Math.round(z * 100)
+  reportViewEdge(z, cw, ch, dpr)
+  // 草稿帧被拉伸显示时（位图比目标矩形小）也必须平滑，否则会看到马赛克
+  ctx.imageSmoothingEnabled = z < 2 || d.bmp.width < d.w * z - 1
+  ctx.imageSmoothingQuality = 'high'
   if (store.editMode === 'crop' && store.cropAngle) {
     const c = imgToScreen(d.w / 2, d.h / 2)
     ctx.save()
@@ -614,6 +640,7 @@ function onPointerDown(e: PointerEvent): void {
       m.strokes.push(stroke)
       drag = { kind: 'mask-brush', index: idx, strokeIndex: m.strokes.length - 1 }
       canvas.value!.setPointerCapture(e.pointerId)
+      setMaskHover(true)             // 涂刷过程中保持红色可见
       maskGeometryChanged()
       redraw()
       return
@@ -816,6 +843,10 @@ function onPointerUp(e: PointerEvent): void {
       || drag.kind === 'mask-radial-scale' || drag.kind === 'mask-radial-rotate') {
     maskGeometryCommitted()
   }
+  if (drag.kind.startsWith('mask-')) {
+    setMaskHover(false)              // 松手后收起叠加，调参数时不再挡画面
+    revealMaskOverlay(900)
+  }
   dstRectPreview = null
   drag = null
   canvas.value?.releasePointerCapture(e.pointerId)
@@ -833,6 +864,7 @@ function onKey(e: KeyboardEvent): void {
 }
 
 let ro: ResizeObserver | null = null
+let detailTimer: number | undefined
 
 onMounted(() => {
   ro = new ResizeObserver(() => redraw())
@@ -844,10 +876,22 @@ onMounted(() => {
 onBeforeUnmount(() => {
   ro?.disconnect()
   window.removeEventListener('keydown', onKey)
+  if (detailTimer) window.clearTimeout(detailTimer)
+})
+
+// 视口需要的分辨率变了（放大到 1:1、窗口变大）：停手后补一张更清晰的图。
+// 拖动/缩放过程中不发请求，避免和参数渲染抢同一个渲染线程。
+watch(() => store.viewEdge, () => {
+  if (detailTimer) window.clearTimeout(detailTimer)
+  detailTimer = window.setTimeout(() => {
+    detailTimer = undefined
+    requestDetail()
+  }, 260)
 })
 
 watch(() => store.frameVersion, () => redraw())
-watch(() => [store.editMode, store.maskSelected, store.maskOverlay, store.cropRect, store.comparing],
+watch(() => [store.editMode, store.maskSelected, store.maskOverlay,
+            store.maskHover, store.maskReveal, store.cropRect, store.comparing],
       () => redraw(), { deep: true })
 
 const cursorClass = computed(() => {
@@ -868,9 +912,26 @@ const cursorClass = computed(() => {
       @dblclick="onDblClick"
       @contextmenu.prevent
     />
+
+    <div class="vignette" />
+
+    <div v-if="store.loaded" class="zoom-bar">
+      <button class="mini" title="适应窗口（0）" @click="zoomFit">适应</button>
+      <button class="mini" title="1:1 像素（1）" @click="zoomOneToOne">100%</button>
+      <span class="zoom-val num">{{ zoomPct }}%</span>
+    </div>
+
     <div v-if="!store.loaded" class="viewport-hint">
+      <div class="hint-mark">
+        <Icon name="image" :size="30" :stroke="1.1" />
+      </div>
       <p class="hint-title">PhotoLab</p>
-      <p>点击左上角「打开」选择一幅图像开始调色</p>
+      <p class="hint-sub">把照片拖进窗口，或点击左上角「打开」</p>
+      <div class="hint-keys">
+        <span><b class="kbd">Ctrl</b><b class="kbd">O</b> 打开</span>
+        <span><b class="kbd">\</b> 对比原图</span>
+        <span><b class="kbd">0</b> 适应窗口</span>
+      </div>
     </div>
   </div>
 </template>
@@ -881,7 +942,7 @@ const cursorClass = computed(() => {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #1a1a1a;
+  background: var(--bg-canvas);
 }
 canvas {
   position: absolute;
@@ -891,8 +952,45 @@ canvas {
   touch-action: none;
 }
 .cursor-grab canvas { cursor: grab; }
+.cursor-grab canvas:active { cursor: grabbing; }
 .cursor-cross canvas { cursor: crosshair; }
 .cursor-mode canvas { cursor: crosshair; }
+
+/* 暗角：给画面一个轻微的“取景器”包裹感，不参与交互 */
+.vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(120% 100% at 50% 45%,
+    rgba(0, 0, 0, 0) 52%, rgba(0, 0, 0, 0.34) 100%);
+}
+
+/* 右下角缩放条 */
+.zoom-bar {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 7px 4px 5px;
+  border-radius: 10px;
+  background: rgba(16, 14, 12, 0.82);
+  box-shadow: inset 0 0 0 1px var(--line-2), 0 8px 22px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px) saturate(1.1);
+  user-select: none;
+}
+.zoom-val {
+  min-width: 44px;
+  text-align: right;
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+  padding-right: 4px;
+}
+
+/* 空态 */
 .viewport-hint {
   position: absolute;
   inset: 0;
@@ -900,14 +998,44 @@ canvas {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #787878;
+  gap: 2px;
+  color: var(--text-3);
   user-select: none;
   pointer-events: none;
+  animation: fade-in 0.3s var(--ease);
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.hint-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 62px;
+  height: 62px;
+  margin-bottom: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text-3);
 }
 .hint-title {
-  font-size: 28px;
-  letter-spacing: 6px;
-  color: #4a9eff;
-  margin-bottom: 10px;
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 5px;
+  color: var(--text-2);
 }
+.hint-sub {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.hint-keys {
+  display: flex;
+  gap: 16px;
+  margin-top: 22px;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.hint-keys span { display: inline-flex; align-items: center; gap: 4px; }
+.hint-keys .kbd { font-weight: 400; }
 </style>

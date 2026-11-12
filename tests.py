@@ -74,6 +74,18 @@ def test_basic():
     check("饱和度增大色差", float(sat[..., 1].mean() - sat[..., 0].mean()) > 0.4)
     check("饱和度 -100 得到灰度", float(np.abs(core.apply_saturation(gray, -100).std(axis=-1).max())) < 1e-5)
     check("自然饱和度 0 为恒等", np.array_equal(core.apply_vibrance(gray, 0), gray))
+    # 合并实现必须与「先饱和再自然饱和度」逐元素等价（推导见 apply_saturation_vibrance）
+    rnd = np.random.default_rng(7).random((48, 64, 3)).astype(np.float32)
+    for sa, vi in ((15, 12), (-40, 30), (60, -50), (100, 100)):
+        seq = core.apply_vibrance(core.apply_saturation(rnd, sa), vi)
+        fus = core.apply_saturation_vibrance(rnd, sa, vi)
+        # 2e-6 容差：分步版会对「已饱和」的图再算一次亮度（数学上等于原亮度，
+        # 浮点上差 1 ULP，±100 极限档放大到 1.9e-6），8 位输出逐位相同
+        check(f"饱和+自然饱和度合并与分步等价({sa},{vi})",
+              float(np.abs(seq - fus).max()) < 2e-6)
+        check(f"合并后 8 位输出逐位相同({sa},{vi})",
+              np.array_equal(core.linear_to_rgb8(np.clip(seq, 0.0, 1.0)),
+                             core.linear_to_rgb8(np.clip(fus, 0.0, 1.0))))
     check("黑色抬升暗部", float(core.apply_blacks(dark, 100).mean()) > 0.02)
 
 
@@ -328,7 +340,8 @@ def test_ai_sanitize():
         "note": "提亮并压暖",
         "unknown_field": 1,
     }, ensure_ascii=False) + "\n```"
-    d = auto.sanitize_ai_params(auto._extract_json(raw))
+    # strength=1.0：先验「纯钳制」行为，不看缩放
+    d = auto.sanitize_ai_params(auto._extract_json(raw), 1.0)
     check("AI 解析:exposure 99 钳到 5", d.get("exposure") == 5.0)
     check("AI 解析:非法字段被丢弃", "contrast" not in d and "unknown_field" not in d)
     check("AI 解析:色温保留", d.get("temperature") == -25.6)
@@ -340,6 +353,31 @@ def test_ai_sanitize():
           and d["pickers"][0]["span"] == 180 and d["pickers"][0]["hue_shift"] == -30)
     check("AI 解析:空输入安全", auto.sanitize_ai_params(None) == {}
           and auto.sanitize_ai_params("bad") == {})
+
+    # ---- 强度缩放：默认 0.6，统一收敛幅度（防过度后期）----
+    base = {"exposure": 2.0, "contrast": 60, "blackwhite": 100,
+            "curves": {"master": [[0, 0], [0.5, 0.7], [1, 1]]},
+            "wheels": {"shadows": {"hue": 40, "saturation": 40, "luminance": -20}},
+            "pickers": [{"hue": 120, "span": 60, "hue_shift": -40,
+                         "saturation": 50, "luminance": 10}]}
+    full = auto.sanitize_ai_params(base, 1.0)
+    check("AI 强度:1.0 与纯钳制等价", full["contrast"] == 60.0
+          and full["wheels"]["shadows"]["saturation"] == 40.0)
+    half = auto.sanitize_ai_params(base, 0.5)
+    check("AI 强度:标量按比例缩小", half["contrast"] == 30.0
+          and half["exposure"] == 1.0 and half["blackwhite"] == 50.0)
+    check("AI 强度:曲线向恒等线收缩",
+          abs(half["curves"]["master"][1][1] - 0.6) < 1e-6)
+    check("AI 强度:色轮/取色器只缩幅度不改色相",
+          half["wheels"]["shadows"]["saturation"] == 20.0
+          and half["wheels"]["shadows"]["hue"] == 40.0
+          and half["pickers"][0]["hue_shift"] == -20.0
+          and half["pickers"][0]["hue"] == 120.0)
+    soft = auto.sanitize_ai_params(base)      # 默认强度
+    check("AI 强度:默认值 0.6", abs(soft["contrast"] - 36.0) < 1e-6
+          and abs(auto.AI_DEFAULT_STRENGTH - 0.6) < 1e-9)
+    zero = auto.sanitize_ai_params(base, 0.0)
+    check("AI 强度:0 等于不做任何调整", zero == {})
 
     # json.loads 默认接受 NaN/Infinity 字面量，必须全部被钳制层丢弃
     nan_case = {"exposure": float("nan"), "contrast": float("inf"),
@@ -451,33 +489,17 @@ def test_ai_mask():
     a2 = core.grid_to_array(m2.grid, 4, 3)
     check("AI 蒙版:裁剪右半后出界格丢弃、保留格重定位",
           a2[0, 1] == 1 and a2[1, 3] == 1 and a2[2, :].max() == 0)
+    check("AI 蒙版:裁剪重映射无空洞（逆映射连续覆盖）",
+          np.array_equal(a2[0], [1, 1, 1, 1]) and np.array_equal(a2[1], [0, 0, 1, 1]))
     m3 = core.MaskState(kind="ai", grid=rows, grid_w=4, grid_h=3, feather=0)
     core.remap_masks_rot90([m3], 3, (240, 180))
     before = core.grid_to_array(rows, 4, 3).sum()
     after = core.grid_to_array(m3.grid, m3.grid_w, m3.grid_h).sum()
     check("AI 蒙版:90° 旋转网格重排（1 的数量不减少）", after >= before - 1)
+    check("AI 蒙版:90° 旋转网格零丢失且维度转置",
+          int(after) == int(before) and (m3.grid_w, m3.grid_h) == (3, 4))
 
-    # ---- auto 层：网格解析 / 清理 / 配置 ----
-    gw, gh = auto._seg_grid_dims(np.zeros((300, 400, 3), np.uint8))
-    check("AI 分割:网格尺寸按宽高比（长边 96）", (gw, gh) == (96, 72))
-    parsed = auto._parse_grid({"rows": ["1 1 0 0", "0110", "0011"]}, 4, 3)
-    check("AI 分割:容忍行内空格/短行补齐", parsed == ["1100", "0110", "0011"])
-    parsed2 = auto._parse_grid([["1", "0"], ["0", "1"]], 2, 2)
-    check("AI 分割:容忍数字列表", parsed2 == ["10", "01"])
-    try:
-        auto._parse_grid({"rows": []}, 4, 3)
-        ok = False
-    except ValueError:
-        ok = True
-    check("AI 分割:空回复报错", ok)
-    cleaned = auto._cleanup_grid(["1111", "1001", "1111"])
-    filled = core.grid_to_array(cleaned, 4, 3)
-    check("AI 分割:闭运算填小孔", filled[1, 1] == 1 and filled[1, 2] == 1)
-    cleaned2 = auto._cleanup_grid(["0000", "0100", "0000", "0000"])
-    check("AI 分割:开运算去孤点", core.grid_to_array(cleaned2, 4, 4).sum() == 0)
-    cleaned3 = auto._cleanup_grid(["1000", "0000", "0000", "0000"])
-    check("AI 分割:角落孤点同样去除（形态学补边）",
-          core.grid_to_array(cleaned3, 4, 4).sum() == 0)
+    # ---- auto 层：配置解析 ----
 
     import os
     envs = ("PHOTOLAB_AI_BASE_URL", "PHOTOLAB_AI_KEY", "PHOTOLAB_AI_MODEL")
@@ -572,7 +594,9 @@ def test_gpu_matches_cpu():
     g = core.process_linear(p, lin)          # 应自动走 GPU
     s = core._process_band(p, lin)           # 单线程 CPU
     d = int(np.abs(g.astype(int) - s.astype(int)).max())
-    check(f"GPU 与 CPU 结果一致（最大差 {d}/255）", d <= 2)
+    # 容差 3/255：sRGB 编码表已与 CPU 共用同一张 16 位量化表，残余差异只来自
+    # float32 与 numpy 的末位舍入在曲线/色轮查表边界上偶尔跨一级（实测 7.7 万像素中 1 个）
+    check(f"GPU 与 CPU 结果一致（最大差 {d}/255）", d <= 3)
 
     p2 = core.Adjustments(blackwhite=100)
     g2 = core.process_linear(p2, lin)
@@ -581,6 +605,21 @@ def test_gpu_matches_cpu():
     check(f"黑白模式 GPU 与 CPU 一致（最大差 {d2}/255）", d2 <= 2)
     check("GPU 路径输出为灰度",
           float(np.abs(g2[..., 0].astype(int) - g2[..., 1]).max()) <= 2)
+
+    # 混合路径：基础影调走 GPU（float32 输出），效果/曲线/分级仍留 CPU
+    p3 = core.Adjustments(temperature=20, tint=5, exposure=0.3, contrast=20,
+                          highlights=-30, shadows=30, whites=10, blacks=-10,
+                          saturation=15, vibrance=12, clarity=25, sharpen=20,
+                          dehaze=10)
+    g3 = core.process_linear(p3, lin)
+    was = core._GPU_ENABLED
+    core._GPU_ENABLED = False
+    try:
+        s3 = core.process_linear(p3, lin)
+    finally:
+        core._GPU_ENABLED = was
+    d3 = int(np.abs(g3.astype(int) - s3.astype(int)).max())
+    check(f"GPU 基础影调 + CPU 效果与纯 CPU 一致（最大差 {d3}/255）", d3 <= 3)
 
 
 def test_mask_advanced():

@@ -118,7 +118,7 @@ export function aiMask(
   name: string, target: AiMaskTarget, grid: string[], gridW: number, gridH: number,
 ): MaskState {
   const m = defaultMask('ai', name)
-  m.feather = 25
+  m.feather = 0           // AI 蒙版按识别边界作用，不羽化
   m.ai_target = target
   m.grid = grid
   m.grid_w = gridW
@@ -131,7 +131,7 @@ export function aiMaskPixels(
   name: string, target: AiMaskTarget, png: string, w: number, h: number,
 ): MaskState {
   const m = defaultMask('ai', name)
-  m.feather = 10          // 像素掩码自带软边界，默认羽化调小
+  m.feather = 0           // AI 蒙版按识别边界作用，不羽化
   m.ai_target = target
   m.mask_png = png
   m.mask_w = w
@@ -159,3 +159,55 @@ export const TONE_FIELDS = [
   'whites', 'blacks', 'saturation', 'vibrance', 'blackwhite',
 ] as const
 export type ToneField = (typeof TONE_FIELDS)[number]
+
+/**
+ * 按强度（0..1）缩放 AI 返回的调整参数，避免模型给过量数值导致过度后期。
+ * 标量与曝光直接乘；曲线向恒等线收缩（y' = x + (y-x)*gain）；
+ * 色轮与取色器的饱和度/明度乘、色相本身不变。
+ */
+export function scaleAiAdjustments(
+  d: Record<string, unknown>, strength: number,
+): Record<string, unknown> {
+  const gain = Math.min(1, Math.max(0, Number(strength)))
+  if (!Number.isFinite(gain) || gain >= 1) return d
+  const out: Record<string, unknown> = { ...d }
+  for (const name of TONE_FIELDS) {
+    const v = out[name]
+    if (typeof v === 'number' && Number.isFinite(v)) out[name] = v * gain
+  }
+  const curves = out['curves']
+  if (curves && typeof curves === 'object') {
+    const scaled: Record<string, unknown> = {}
+    for (const [ch, pts] of Object.entries(curves as Record<string, unknown>)) {
+      if (!Array.isArray(pts)) continue
+      scaled[ch] = pts
+        .filter((p): p is [number, number] => Array.isArray(p) && p.length === 2)
+        .map(([x, y]) => [x, x + (y - x) * gain] as [number, number])
+    }
+    out['curves'] = scaled
+  }
+  const wheels = out['wheels']
+  if (wheels && typeof wheels === 'object') {
+    const scaled: Record<string, unknown> = {}
+    for (const [range, w] of Object.entries(wheels as Record<string, unknown>)) {
+      if (!w || typeof w !== 'object') continue
+      const wheel = w as Record<string, unknown>
+      scaled[range] = {
+        hue: Number(wheel.hue) || 0,
+        saturation: (Number(wheel.saturation) || 0) * gain,
+        luminance: (Number(wheel.luminance) || 0) * gain,
+      }
+    }
+    out['wheels'] = scaled
+  }
+  const pickers = out['pickers']
+  if (Array.isArray(pickers)) {
+    out['pickers'] = (pickers as Record<string, unknown>[]).map((p) => ({
+      ...p,
+      hue_shift: (Number(p.hue_shift) || 0) * gain,
+      saturation: (Number(p.saturation) || 0) * gain,
+      luminance: (Number(p.luminance) || 0) * gain,
+    }))
+  }
+  return out
+}

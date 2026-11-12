@@ -91,7 +91,7 @@ if not exist node_modules (
     call npm install
     if errorlevel 1 ( popd & echo [´íÎó] desktop npm install Ê§°Ü & goto :fail )
 )
-call npm run dist
+call node node_modules\electron-builder\out\cli\cli.js --win
 if errorlevel 1 ( popd & echo [´íÎó] electron-builder Ê§°Ü & goto :fail )
 popd
 

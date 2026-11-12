@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /** 曲线编辑器：对照旧 ui_widgets.CurveEditor。
  *  四通道（RGB/红/绿/蓝），网格 + 虚线对角线 + 直方图背景，其它通道淡色上下文；
- *  左键拖点（端点钉在 x=0/1）、双击加点（x 过近丢弃）、右键删点（端点除外）。 */
+ *  左键拖点（端点钉在 x=0/1）、空白处按下即加点并直接拖动、双击加点、右键删点（端点除外）。 */
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { buildLut } from '@/lib/curve'
 import { CURVE_CHANNEL_COLORS, CURVE_CHANNEL_LABELS } from '@/lib/presets'
 import type { CurveChannel, CurvePoints } from '@/api/types'
 import { CURVE_CHANNELS, defaultCurves } from '@/api/types'
+import Icon from '@/components/Icon'
 import type { HistData } from '@/api/client'
 
 const props = defineProps<{
@@ -20,7 +21,8 @@ const emit = defineEmits<{
 }>()
 
 const MARGIN = 12
-const HIT_RADIUS = 9
+const HIT_RADIUS = 13        // 命中半径（px）：9 → 13，窄面板下也能稳稳点中
+const ADD_TOLERANCE = 5      // 空白处加点时与已有点的 x 最小间距（px）
 const LUT_SIZE = 2048
 const GAP = 1 / 512
 
@@ -107,11 +109,11 @@ function redraw(): void {
   const ctx = cv.getContext('2d')!
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   const r = plotRect()
-  ctx.fillStyle = '#202020'
+  ctx.fillStyle = '#0a0c10'
   ctx.fillRect(0, 0, el.clientWidth, el.clientHeight)
 
   // 网格
-  ctx.strokeStyle = '#3a3a3a'
+  ctx.strokeStyle = 'rgba(255,255,255,0.055)'
   ctx.lineWidth = 1
   for (let i = 1; i <= 3; i++) {
     const x = r.left + r.w * i / 4
@@ -120,7 +122,7 @@ function redraw(): void {
     ctx.beginPath(); ctx.moveTo(r.left, y); ctx.lineTo(r.left + r.w, y); ctx.stroke()
   }
   // 虚线对角线
-  ctx.strokeStyle = '#4a4a4a'
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)'
   ctx.setLineDash([4, 4])
   const [dx0, dy0] = toWidget(0.02, 0.02)
   const [dx1, dy1] = toWidget(0.98, 0.98)
@@ -150,9 +152,9 @@ function redraw(): void {
     const sel = i === selected || i === dragIndex
     ctx.beginPath()
     ctx.arc(px, py, sel ? 5.5 : 4.2, 0, Math.PI * 2)
-    ctx.fillStyle = sel ? '#e2e2e2' : '#242424'
+    ctx.fillStyle = sel ? '#ecedf1' : '#0a0c10'
     ctx.fill()
-    ctx.strokeStyle = sel ? '#4a9eff' : CURVE_CHANNEL_COLORS[channel.value]
+    ctx.strokeStyle = sel ? '#7d8bff' : CURVE_CHANNEL_COLORS[channel.value]
     ctx.lineWidth = 1.5
     ctx.stroke()
   }
@@ -165,10 +167,39 @@ function hitTest(px: number, py: number): number | null {
   const pts = points()
   for (let i = 0; i < pts.length; i++) {
     const [wx, wy] = toWidget(pts[i][0], pts[i][1])
-    const d = Math.abs(wx - px) + Math.abs(wy - py)     // manhattanLength 对照
+    const d = Math.hypot(wx - px, wy - py)              // 欧氏距离：斜向也容易命中
     if (d < bestD) { best = i; bestD = d }
   }
   return best
+}
+
+/** 横向距离最近的点（px）：纵向离得远但 x 对得上时也直接抓住该点，避免"点了没反应"。 */
+function pointAtX(px: number): number | null {
+  let best: number | null = null
+  let bestD = ADD_TOLERANCE
+  const pts = points()
+  for (let i = 0; i < pts.length; i++) {
+    const [wx] = toWidget(pts[i][0], 0)
+    const d = Math.abs(wx - px)
+    if (d < bestD) { best = i; bestD = d }
+  }
+  return best
+}
+
+/** 在 (ix, iy) 插入控制点并返回其索引；与已有点 x 过近或落在绘图区外返回 null。 */
+function insertPoint(ixIn: number, iyIn: number): number | null {
+  const r = plotRect()
+  const ix = Math.min(1, Math.max(0, ixIn))    // 边缘留白内也接纳，夹到 0..1
+  const iy = Math.min(1, Math.max(0, iyIn))
+  const pts = points()
+  const tolX = ADD_TOLERANCE / Math.max(r.w, 1)
+  if (pts.some(([px]) => Math.abs(px - ix) < tolX)) return null
+  const pt: [number, number] = [ix, iy]
+  const next = [...pts.map(p => [...p] as [number, number]), pt]
+    .sort((a, b) => a[0] - b[0])
+  props.curves[channel.value] = next
+  emit('changed', channel.value, next.map(p => [...p] as [number, number]))
+  return next.indexOf(pt)
 }
 
 function localPos(e: MouseEvent): [number, number] {
@@ -183,6 +214,22 @@ function onMouseDown(e: MouseEvent): void {
     if (idx !== null) {
       dragIndex = idx
       selected = idx
+      redraw()
+      return
+    }
+    // 空白处按下：x 对得上已有点就拖它，否则立刻插点并进入拖动（LR 式，不用先双击）
+    const near = pointAtX(px)
+    if (near !== null) {
+      dragIndex = near
+      selected = near
+      redraw()
+      return
+    }
+    const [ix, iy] = toImage(px, py)
+    const added = insertPoint(ix, iy)
+    if (added !== null) {
+      dragIndex = added
+      selected = added
       redraw()
     }
   } else if (e.button === 2) {
@@ -224,16 +271,12 @@ function onMouseUp(e: MouseEvent): void {
 }
 
 function onDblClick(e: MouseEvent): void {
+  // 单击已能在空白处加点，这里保留双击加点以兼容旧习惯（重复点击会被 x 容差挡住）
   const [ix, iy] = toImage(...localPos(e))
-  if (ix < 0 || ix > 1 || iy < 0 || iy > 1) return
-  const pts = points()
-  if (pts.some(([px]) => Math.abs(ix - px) < GAP)) return
-  const newPt: [number, number] = [Math.min(1, Math.max(0, ix)), Math.min(1, Math.max(0, iy))]
-  const next = [...pts, newPt].sort((a, b) => a[0] - b[0])
-  selected = next.findIndex(p => p[0] === newPt[0] && p[1] === newPt[1])
-  props.curves[channel.value] = next
-  emit('changed', channel.value, next.map(p => [...p] as [number, number]))
-  emit('committed', channel.value, next.map(p => [...p] as [number, number]))
+  const added = insertPoint(ix, iy)
+  if (added === null) return
+  selected = added
+  emit('committed', channel.value, points().map(p => [...p] as [number, number]))
   redraw()
 }
 
@@ -270,7 +313,7 @@ function resetChannel(): void {
         :style="ch === channel ? { color: CURVE_CHANNEL_COLORS[ch] } : {}"
         @click="channel = ch"
       >{{ CURVE_CHANNEL_LABELS[ch] }}</button>
-      <button class="ch-reset" title="复位当前通道" @click="resetChannel">↺</button>
+      <button class="ch-reset" title="复位当前通道" @click="resetChannel"><Icon name="reset" :size="12" /></button>
     </div>
     <div ref="wrap" class="plot">
       <canvas
@@ -290,45 +333,52 @@ function resetChannel(): void {
 .curve-editor { width: 100%; }
 .channel-tabs {
   display: flex;
-  gap: 4px;
-  margin-bottom: 6px;
   align-items: center;
+  gap: 2px;
+  margin-bottom: 8px;
 }
 .ch-tab {
-  border: 1px solid transparent;
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--r-1);
   background: transparent;
-  color: #868686;
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 4px;
+  color: var(--text-3);
+  font-size: 11.5px;
   cursor: pointer;
+  transition: background 0.14s var(--ease), color 0.14s var(--ease);
 }
-.ch-tab.active {
-  border-color: #484848;
-  background: #262626;
-  color: #e2e2e2;
-}
-.ch-tab:hover { color: #d2d2d2; }
+.ch-tab:hover { color: var(--text-2); background: rgba(255, 255, 255, 0.05); }
+.ch-tab.active { background: rgba(255, 255, 255, 0.08); }
 .ch-reset {
   margin-left: auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
+  border-radius: var(--r-1);
   background: transparent;
-  color: #6e6e6e;
+  color: var(--text-3);
   cursor: pointer;
-  font-size: 12px;
+  transition: background 0.14s var(--ease), color 0.14s var(--ease);
 }
-.ch-reset:hover { color: #4a9eff; }
+.ch-reset:hover { background: rgba(255, 255, 255, 0.07); color: var(--accent); }
 .plot {
   position: relative;
   width: 100%;
-  height: 190px;
-  border-radius: 4px;
+  height: 196px;
+  border-radius: var(--r-2);
   overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--line);
+  background: var(--well);
 }
 .plot canvas {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+  cursor: crosshair;
 }
 </style>

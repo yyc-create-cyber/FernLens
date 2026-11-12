@@ -4,31 +4,102 @@
  */
 import { reactive, toRaw } from 'vue'
 import {
-  Adjustments, CURVE_CHANNELS, GRADING_RANGES, TONE_FIELDS, aiMask, aiMaskPixels,
+  Adjustments, CURVE_CHANNELS, GRADING_RANGES, TONE_FIELDS, aiMaskPixels,
   defaultAdjustments,
 } from '@/api/types'
 import type { AdjustmentsLike, AiMaskTarget, MaskKind, MaskState, PickerState, WheelState } from '@/api/types'
 import { defaultMask } from '@/api/types'
 import * as api from '@/api/client'
 import type { AiConfig, HistData, LibraryItem, LocalModelsStatus, RectNorm, ServerEvent } from '@/api/client'
-import { presetColor } from '@/lib/presets'
+import { presetColor, CURVE_CHANNEL_LABELS, RANGE_LABELS } from '@/lib/presets'
+import {
+  BUILTIN_FILTERS, applyLook, downloadJson, filterFileName, filterToFile,
+  lookFromAdjustments, parseFilterFile, sanitizeLook,
+} from '@/lib/filters'
+import type { FilterPreset } from '@/lib/filters'
 
 interface Frame { bmp: ImageBitmap; rid: number }
 
 /** AI 端点配置（localStorage 持久化；服务端也支持环境变量回退）。 */
 const AI_CONFIG_KEY = 'photolab.ai-config'
+/** 精修提示词（可选，随每次 AI 请求发送；localStorage 持久化）。 */
+const AI_INTENT_KEY = 'photolab.ai-intent'
+
+function loadAiIntent(): string {
+  try {
+    return localStorage.getItem(AI_INTENT_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+/** AI 调整强度取值收敛到 [AI_STRENGTH_MIN, AI_STRENGTH_MAX]，缺省用默认值。 */
+function clampStrength(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(n)) return api.AI_STRENGTH_DEFAULT
+  return Math.min(api.AI_STRENGTH_MAX, Math.max(api.AI_STRENGTH_MIN, n))
+}
 
 function loadAiConfig(): AiConfig {
   try {
     const raw = JSON.parse(localStorage.getItem(AI_CONFIG_KEY) || '')
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+    // 旧版是单端点 + imageModel 复用：迁移成 llm / image 两套独立端点
+    if (raw && typeof raw === 'object' && raw.llm) {
+      return {
+        llm: { baseUrl: str(raw.llm.baseUrl), apiKey: str(raw.llm.apiKey),
+               model: str(raw.llm.model) },
+        image: { baseUrl: str(raw.image?.baseUrl), apiKey: str(raw.image?.apiKey),
+                 model: str(raw.image?.model) },
+        strength: clampStrength(raw.strength),
+      }
+    }
+    const baseUrl = str(raw?.baseUrl), apiKey = str(raw?.apiKey)
+    const model = str(raw?.model), imageModel = str(raw?.imageModel) || model
     return {
-      baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl : '',
-      apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : '',
-      model: typeof raw.model === 'string' ? raw.model : '',
+      llm: { baseUrl, apiKey, model },
+      image: imageModel ? { baseUrl, apiKey, model: imageModel } : api.emptyAiEndpoint(),
+      strength: clampStrength(raw?.strength),
     }
   } catch {
     return api.emptyAiConfig()
   }
+}
+
+/** 自定义滤镜（localStorage 持久化；导入的 JSON 也存这里）。 */
+const FILTERS_KEY = 'photolab.filters'
+
+function loadCustomFilters(): FilterPreset[] {
+  try {
+    const raw = localStorage.getItem(FILTERS_KEY)
+    if (!raw) return []
+    const list = JSON.parse(raw) as unknown
+    if (!Array.isArray(list)) return []
+    const out: FilterPreset[] = []
+    for (const it of list) {
+      if (!it || typeof it !== 'object') continue
+      const o = it as Record<string, unknown>
+      const look = sanitizeLook(o['look'])
+      if (!Object.keys(look).length) continue
+      out.push({
+        id: typeof o['id'] === 'string' && o['id'] ? o['id'] : `custom:${out.length}-${Date.now()}`,
+        name: typeof o['name'] === 'string' && o['name'] ? o['name'] : '未命名滤镜',
+        group: '自定义',
+        note: typeof o['note'] === 'string' ? o['note'] : undefined,
+        look,
+        createdAt: typeof o['createdAt'] === 'number' ? o['createdAt'] : Date.now(),
+      })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+function persistCustomFilters(): void {
+  try {
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(state.customFilters))
+  } catch { /* 忽略配额错误 */ }
 }
 
 const state = reactive({
@@ -42,6 +113,12 @@ const state = reactive({
   previewFrame: null as Frame | null,
   fullFrame: null as Frame | null,
   frameVersion: 0,
+  /** 视口需要渲染的长边（像素）：Viewport 按窗口/DPR/缩放写入，渲染按它分级 */
+  viewEdge: 900,
+  /** 显示几何基准（长边像素）：取最近一帧「全尺寸」结果的尺寸。
+   *  草稿帧分辨率更低，但必须拉伸到同一矩形显示，否则拖动时画面会突然缩小。 */
+  geomW: 0,
+  geomH: 0,
   histogram: null as HistData | null,
   status: '',
   meta: null as api.Meta | null,
@@ -50,7 +127,9 @@ const state = reactive({
   currentImageId: null as number | null,
   // AI 设置（顶栏 ⚙ 打开；未配置时 AI 功能会提示先配置）
   aiConfig: loadAiConfig(),
+  aiIntent: loadAiIntent(),
   aiSettingsOpen: false,
+  aiChatOpen: false,
   aiBusy: null as AiMaskTarget | null,
   // 本地像素级引擎（SAM2 + U2Net；就绪时 AI 蒙版默认走本地，图像不出本机）
   localAI: null as LocalModelsStatus | null,
@@ -73,6 +152,16 @@ const state = reactive({
   originalBmp: null as ImageBitmap | null,
   // 蒙版叠加显示（LR 的 O 键开关；仅影响叠加显示，不影响渲染）
   maskOverlay: true,
+  // 蒙版红色叠加只在「需要看蒙版」时出现：悬停蒙版条目（maskHover）
+  // 或新建/预览后的短暂显示（maskReveal），避免调参数时一直挡着画面
+  maskHover: false,
+  maskReveal: false,
+  // 历史记录（每图独立；存完整参数快照，可跳到任意一步）
+  history: [] as { label: string; at: number }[],
+  historyIndex: -1,
+  // 滤镜：lastApplied 用于高亮当前套用的预设（手改参数后自动清除）
+  customFilters: loadCustomFilters(),
+  activeFilter: '',
 })
 
 // 每图独立状态（非响应式：体积大且只在切换时整体读写）
@@ -84,19 +173,39 @@ export function aiConfigured(): boolean {
   return api.aiConfigComplete(state.aiConfig)
 }
 
+/** 生图（第 3 个 AI 功能）是否已配置图生图端点。 */
+export function aiImageConfigured(): boolean {
+  return api.aiImageComplete(state.aiConfig)
+}
+
 /** 拉取本地像素级引擎状态（就绪时 AI 蒙版默认走本地引擎）。 */
 export async function refreshLocalAI(): Promise<void> {
   try { state.localAI = await api.getLocalModels() } catch { state.localAI = null }
 }
 
 export function saveAiConfig(cfg: AiConfig): void {
-  state.aiConfig = { ...cfg }
+  state.aiConfig = { ...cfg, strength: clampStrength(cfg.strength) }
   try { localStorage.setItem(AI_CONFIG_KEY, JSON.stringify(state.aiConfig)) } catch { /* 忽略 */ }
+}
+
+/** 保存精修提示词（空字符串 = 由模型自选风格）。 */
+export function saveAiIntent(intent: string): void {
+  state.aiIntent = intent.trim()
+  try { localStorage.setItem(AI_INTENT_KEY, state.aiIntent) } catch { /* 忽略 */ }
 }
 
 export function openAiSettings(): void {
   state.aiSettingsOpen = true
   void refreshLocalAI()
+}
+
+/** 打开/关闭右下角 AI 对话框（对话 / 参数 / 生图）。 */
+export function openAiChat(): void {
+  state.aiChatOpen = true
+}
+
+export function closeAiChat(): void {
+  state.aiChatOpen = false
 }
 
 let ridCounter = 0
@@ -112,8 +221,9 @@ sock.onFrame = (rid, isFull, jpeg) => {
     const slot = isFull ? 'fullFrame' : 'previewFrame'
     state[slot]?.bmp.close()
     state[slot] = { bmp, rid }
+    if (isFull) { state.geomW = bmp.width; state.geomH = bmp.height }   // 几何基准
     state.frameVersion++
-    if (isFull) scheduleHistogram()
+    scheduleHistogram()
   }).catch(() => { /* 坏帧忽略 */ })
 }
 
@@ -135,14 +245,56 @@ sock.onState = (ok) => {
 sock.connect()
 
 // ------------------------------------------------------------ 调度
+/** 显示所需的长边（像素）。Viewport 按窗口尺寸、DPR 与缩放倍数写入。 */
+export const PREVIEW_MAX_EDGE = 1200
+
+/** 停手后的目标分辨率：屏幕需要多少就渲染多少，绝不再对整张原图做交互渲染。 */
+function targetEdge(): number {
+  const e = Math.round(state.viewEdge || 900)
+  return Math.min(3200, Math.max(420, e))
+}
+
+/** 拖动中的草稿分辨率（约 0.6 倍长边 → 像素量 1/3）。 */
+function draftEdge(): number {
+  return Math.max(360, Math.round(targetEdge() * 0.62))
+}
+
+/** 超过预览图尺寸就必须取原图数据源，否则拉不出更细的细节。 */
+function kindFor(edge: number): 'preview' | 'full' {
+  return edge > PREVIEW_MAX_EDGE ? 'full' : 'preview'
+}
+
 function sendFull(): void {
   const rid = ++ridCounter
-  sock.sendRender(rid, 'full', toRaw(state.adjustments))
+  const edge = targetEdge()
+  sock.sendRender(rid, kindFor(edge), toRaw(state.adjustments), edge)
+  recordHistory()                     // 每次全图渲染 = 一个可回退的状态点
 }
 
 function sendPreview(): void {
   const rid = ++ridCounter
-  sock.sendRender(rid, 'preview', toRaw(state.adjustments))
+  const edge = draftEdge()
+  sock.sendRender(rid, kindFor(edge), toRaw(state.adjustments), edge)
+}
+
+/**
+ * 由 Viewport 调用：告诉调度层“屏幕现在需要多少像素的长边”。
+ * 注意只记数不立即渲染——真正发请求仍由 notifyChanged/notifyCommitted 触发，
+ * 避免缩放/窗口变化时和参数调整抢同一个渲染线程。
+ */
+export function setViewEdge(edge: number): void {
+  const e = Math.round(edge)
+  if (!Number.isFinite(e) || e <= 0) return
+  if (Math.abs(e - state.viewEdge) < 40) return     // 轻微变化不重渲染
+  state.viewEdge = e
+}
+
+/** 视口需要更高分辨率时（放大到 1:1、窗口变大）补一张清晰的图。 */
+export function requestDetail(): void {
+  if (!state.loaded) return
+  const rid = ++ridCounter
+  const edge = targetEdge()
+  sock.sendRender(rid, kindFor(edge), toRaw(state.adjustments), edge)
 }
 
 let previewTimer: ReturnType<typeof setTimeout> | null = null
@@ -151,6 +303,7 @@ let idleTimer: ReturnType<typeof setTimeout> | null = null
 /** 参数变化（拖动中）：节流发 preview + 空闲 400ms 后发 full。 */
 export function notifyChanged(): void {
   if (!state.loaded) return
+  if (!filterApplying && state.maskSelected === null) state.activeFilter = ''
   if (previewTimer === null) {
     previewTimer = setTimeout(() => { previewTimer = null; sendPreview() }, 30)
   }
@@ -161,8 +314,206 @@ export function notifyChanged(): void {
 /** 参数提交（松手/开关切换）：立即全图。 */
 export function notifyCommitted(): void {
   if (!state.loaded) return
+  if (!filterApplying && state.maskSelected === null) state.activeFilter = ''
   if (idleTimer !== null) { clearTimeout(idleTimer); idleTimer = null }
   sendFull()
+}
+
+// ------------------------------------------------------------ 历史记录
+/** 一步历史：完整参数快照（JSON 串，含蒙版）+ 描述；全局回退 = 直接跳到第 N 步。 */
+interface HistoryStep { label: string; at: number; snap: string }
+interface HistoryRec { steps: HistoryStep[]; index: number; bytes: number }
+
+const HISTORY_MAX_STEPS = 120
+const HISTORY_MAX_BYTES = 64 * 1024 * 1024
+const HISTORY_MERGE_MS = 900          // 同字段连续调整的合并窗口
+const HISTORIES = new Map<number, HistoryRec>()
+let historyMuted = false
+let pendingLabel = ''                     // 下个 sendFull 要用的描述（裁剪/旋转/重置）
+
+const FIELD_LABELS: Record<string, string> = {
+  temperature: '色温', tint: '色调', exposure: '曝光', contrast: '对比度',
+  highlights: '高光', shadows: '阴影', whites: '白色', blacks: '黑色',
+  saturation: '饱和度', vibrance: '自然饱和度', blackwhite: '黑白',
+  clarity: '清晰度', denoise: '降噪', sharpen: '锐度', dehaze: '去朦胧',
+}
+
+/** 历史描述要覆盖的字段（比 TONE_FIELDS 多效果四件套）。 */
+const HISTORY_FIELDS = [
+  ...TONE_FIELDS, 'clarity', 'denoise', 'sharpen', 'dehaze',
+] as const
+
+function fmtNum(v: number): string {
+  const s = (Math.round(v * 100) / 100).toFixed(2).replace(/\.?0+$/, '')
+  return s === '' || s === '-0' ? '0' : s
+}
+
+/** 对比前后两份参数，生成人话描述（用于历史列表）。 */
+function describeChange(prev: Adjustments | null, cur: Adjustments): string {
+  if (!prev) return '打开图像'
+  const out: string[] = []
+  for (const f of HISTORY_FIELDS) {
+    const a = prev[f], b = cur[f]
+    if (a !== b) out.push(`${FIELD_LABELS[f]} ${b > a ? '+' : ''}${fmtNum(b)}`)
+  }
+  if (prev.blend !== cur.blend) out.push(`混合 ${fmtNum(cur.blend)}`)
+  for (const ch of CURVE_CHANNELS) {
+    if (JSON.stringify(prev.curves[ch]) !== JSON.stringify(cur.curves[ch])) {
+      out.push(`曲线 · ${CURVE_CHANNEL_LABELS[ch]}`)
+    }
+  }
+  for (const r of GRADING_RANGES) {
+    if (JSON.stringify(prev.wheels[r]) !== JSON.stringify(cur.wheels[r])) {
+      out.push(`分级 · ${RANGE_LABELS[r]}`)
+    }
+  }
+  if (prev.pickers.length !== cur.pickers.length) {
+    out.push(cur.pickers.length > prev.pickers.length ? '新增取色点' : '删除取色点')
+  } else if (JSON.stringify(prev.pickers) !== JSON.stringify(cur.pickers)) {
+    out.push('取色调整')
+  }
+  if (prev.masks.length !== cur.masks.length) {
+    const added = cur.masks.length > prev.masks.length
+    const m = added ? cur.masks[cur.masks.length - 1] : null
+    out.push(added ? `新增蒙版「${m?.name || '蒙版'}」` : '删除蒙版')
+  } else if (JSON.stringify(prev.masks) !== JSON.stringify(cur.masks)) {
+    out.push('蒙版调整')
+  }
+  if (!out.length) return '调整'
+  if (out.length <= 2) return out.join('，')
+  return `${out[0]} 等 ${out.length} 项`
+}
+
+/** 描述的首段（用于合并同字段的连续调整）。 */
+function labelFamily(label: string): string {
+  return label.split(/[ ，]/)[0]
+}
+
+function histOf(id: number): HistoryRec {
+  let h = HISTORIES.get(id)
+  if (!h) { h = { steps: [], index: -1, bytes: 0 }; HISTORIES.set(id, h) }
+  return h
+}
+
+function syncHistoryView(): void {
+  const id = state.currentImageId
+  const h = id === null ? undefined : HISTORIES.get(id)
+  state.history = h ? h.steps.map(s => ({ label: s.label, at: s.at })) : []
+  state.historyIndex = h ? h.index : -1
+}
+
+/** 打开图像时建立初始快照（第 1 步 = 当前参数）。 */
+export function beginHistory(label = '打开图像'): void {
+  if (state.currentImageId === null) return
+  const h = histOf(state.currentImageId)
+  if (!h.steps.length) {
+    const snap = JSON.stringify(toRaw(state.adjustments))
+    h.steps.push({ label, at: Date.now(), snap })
+    h.bytes = snap.length
+    h.index = 0
+  } else {
+    h.index = Math.min(h.index, h.steps.length - 1)
+  }
+  syncHistoryView()
+}
+
+/** 记录一步（由 sendFull 调用；同一快照自动去重）。 */
+export function recordHistory(explicitLabel = ''): void {
+  if (historyMuted || !state.loaded || state.currentImageId === null) return
+  const h = histOf(state.currentImageId)
+  const snap = JSON.stringify(toRaw(state.adjustments))
+  const cur = h.steps[h.index]
+  if (cur && cur.snap === snap) return                      // 无变化
+  if (h.index < h.steps.length - 1) {                       // 回退后再调整：丢弃“未来”
+    for (const s of h.steps.slice(h.index + 1)) h.bytes -= s.snap.length
+    h.steps.length = h.index + 1
+  }
+  const prev = cur ? JSON.parse(cur.snap) as Adjustments : null
+  const label = explicitLabel || pendingLabel || describeChange(prev, JSON.parse(snap) as Adjustments)
+  const forced = !!(explicitLabel || pendingLabel)
+  const last = h.steps[h.index]
+  const merge = !forced && last && Date.now() - last.at < HISTORY_MERGE_MS
+    && labelFamily(last.label) === labelFamily(label)
+  if (merge) {
+    h.bytes += snap.length - last.snap.length
+    last.snap = snap
+    last.label = label
+    last.at = Date.now()
+  } else {
+    h.steps.push({ label, at: Date.now(), snap })
+    h.bytes += snap.length
+    h.index = h.steps.length - 1
+  }
+  while (h.steps.length > HISTORY_MAX_STEPS
+         || (h.bytes > HISTORY_MAX_BYTES && h.steps.length > 2)) {
+    const dropped = h.steps.shift()
+    if (!dropped) break
+    h.bytes -= dropped.snap.length
+    h.index = Math.max(0, h.index - 1)
+  }
+  syncHistoryView()
+}
+
+/** 跳到第 index 步（0 基）：整体恢复该步的全部参数（滑块/曲线/分级/蒙版/取色）。 */
+export function jumpToHistory(index: number): void {
+  const id = state.currentImageId
+  const h = id === null ? undefined : HISTORIES.get(id)
+  if (!h || index < 0 || index >= h.steps.length || index === h.index) return
+  const step = h.steps[index]
+  historyMuted = true
+  try {
+    state.adjustments = JSON.parse(step.snap) as Adjustments
+    if (state.maskSelected !== null && state.maskSelected >= state.adjustments.masks.length) {
+      state.maskSelected = null
+    }
+    if (state.maskSelected === null && state.editMode === 'mask') state.editMode = null
+    if (state.pickSelected !== null && state.pickSelected >= state.adjustments.pickers.length) {
+      state.pickSelected = null
+    }
+    if (typeof state.pickTarget === 'number' && state.pickTarget >= state.adjustments.pickers.length) {
+      state.pickTarget = null
+    }
+    h.index = index
+    state.activeFilter = ''
+    syncHistoryView()
+    sendFull()
+    state.status = `已回到第 ${index + 1} 步：${step.label}`
+  } finally {
+    historyMuted = false
+  }
+}
+
+export function undoHistory(): void {
+  const id = state.currentImageId
+  const h = id === null ? undefined : HISTORIES.get(id)
+  if (!h || h.index <= 0) return
+  jumpToHistory(h.index - 1)
+}
+
+export function redoHistory(): void {
+  const id = state.currentImageId
+  const h = id === null ? undefined : HISTORIES.get(id)
+  if (!h || h.index >= h.steps.length - 1) return
+  jumpToHistory(h.index + 1)
+}
+
+/** 清空当前图的历史，只保留当前状态作为第 1 步。 */
+export function clearHistory(): void {
+  const id = state.currentImageId
+  if (id === null) return
+  const snap = JSON.stringify(toRaw(state.adjustments))
+  HISTORIES.set(id, { steps: [{ label: '当前状态', at: Date.now(), snap }], index: 0, bytes: snap.length })
+  syncHistoryView()
+}
+
+export function dropHistory(id: number): void {
+  HISTORIES.delete(id)
+}
+
+/** 带描述的提交（裁剪/旋转/重置这类非参数差异一步特例）。 */
+export function notifyCommittedLabeled(label: string): void {
+  pendingLabel = label
+  try { notifyCommitted() } finally { pendingLabel = '' }
 }
 
 // ---- 直方图：full 帧后节流拉取（对照旧版 0.3s 节流）----
@@ -219,12 +570,16 @@ function _applyLoaded(meta: { id: number; name?: string; width: number; height: 
   state.fullFrame?.bmp.close()
   state.previewFrame = null
   state.fullFrame = null
+  state.geomW = 0
+  state.geomH = 0
   newestRid = -1
   _resetEditState()
   state.originalBmp = null
   state.adjustments = imageParams.get(meta.id) ?? defaultAdjustments()
+  state.activeFilter = ''
   state.loaded = true
   state.status = status
+  beginHistory()                       // 每图独立历史：首次打开以当前参数为第 1 步
   state.histogram = null
   void _ensureOriginal(meta.id)
   void refreshLibrary()
@@ -310,6 +665,7 @@ export async function removeImage(id: number): Promise<void> {
   try {
     const r = await api.removeLibrary(id)
     imageParams.delete(id)
+    dropHistory(id)
     originalBmps.get(id)?.close()
     originalBmps.delete(id)
     originalBlobs.delete(id)
@@ -323,9 +679,13 @@ export async function removeImage(id: number): Promise<void> {
       state.fullFrame?.bmp.close()
       state.previewFrame = null
       state.fullFrame = null
+      state.geomW = 0
+      state.geomH = 0
       state.originalBmp?.close()
       state.originalBmp = null
       state.histogram = null
+      state.history = []
+      state.historyIndex = -1
       newestRid = -1
       _resetEditState()
       state.status = '图库已清空'
@@ -344,7 +704,8 @@ export function setComparing(on: boolean): void {
 
 export function resetAll(): void {
   state.adjustments = defaultAdjustments()
-  notifyCommitted()
+  state.activeFilter = ''
+  notifyCommittedLabeled('重置全部')
 }
 
 export function toggleBlackwhite(): void {
@@ -404,6 +765,85 @@ export function applyAdjustmentDict(d: Record<string, unknown>): void {
   notifyCommitted()
 }
 
+// ------------------------------------------------------------ 滤镜（预设 look）
+/** 套用滤镜时抑制「手改参数清除高亮」的逻辑。 */
+let filterApplying = false
+
+/** 基础滤镜 + 自定义滤镜（组件渲染用）。 */
+export function allFilters(): FilterPreset[] {
+  return [...BUILTIN_FILTERS, ...state.customFilters]
+}
+
+/** 套用滤镜：只覆盖全局影调/曲线/分级，蒙版与取色点不动。 */
+export function applyFilter(p: FilterPreset): void {
+  if (!state.loaded) return
+  if (state.maskSelected !== null) exitMaskEdit()      // 滤镜是全局的，先退出局部编辑
+  filterApplying = true
+  try {
+    applyLook(state.adjustments, p.look)
+    state.activeFilter = p.id
+    notifyCommittedLabeled(`滤镜 · ${p.name}`)
+    state.status = `已应用滤镜「${p.name}」`
+  } finally {
+    filterApplying = false
+  }
+}
+
+/** 把当前全局参数存成新滤镜（名称去首尾空格，最长 40 字）。 */
+export function saveCurrentAsFilter(name: string): FilterPreset | null {
+  const n = name.trim().slice(0, 40)
+  if (!n) { state.status = '滤镜名称不能为空'; return null }
+  const p: FilterPreset = {
+    id: `custom:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name: n,
+    group: '自定义',
+    look: lookFromAdjustments(state.adjustments),
+    createdAt: Date.now(),
+  }
+  state.customFilters.unshift(p)
+  persistCustomFilters()
+  state.activeFilter = p.id
+  state.status = `已保存滤镜「${n}」`
+  return p
+}
+
+export function deleteCustomFilter(id: string): void {
+  const i = state.customFilters.findIndex(f => f.id === id)
+  if (i < 0) return
+  const [removed] = state.customFilters.splice(i, 1)
+  if (state.activeFilter === id) state.activeFilter = ''
+  persistCustomFilters()
+  state.status = `已删除滤镜「${removed.name}」`
+}
+
+/** 导出滤镜 JSON：传 id 列表则只导这些，不传则导出全部自定义滤镜。 */
+export function exportFilters(ids?: string[]): void {
+  const list = ids && ids.length
+    ? state.customFilters.filter(f => ids.includes(f.id))
+    : state.customFilters
+  if (!list.length) { state.status = '没有可导出的自定义滤镜'; return }
+  const payload = list.length === 1
+    ? filterToFile(list[0])
+    : { format: 'photolab-filter', version: 1, filters: list.map(filterToFile) }
+  downloadJson(filterFileName(list.length === 1 ? list[0].name : '全部'), payload)
+  state.status = `已导出 ${list.length} 个滤镜`
+}
+
+/** 从 JSON 导入滤镜（支持单个 / 数组 / {filters:[]} 三种写法）。 */
+export async function importFiltersFromFile(file: File): Promise<number> {
+  try {
+    const text = await file.text()
+    const list = parseFilterFile(text, file.name.replace(/\.json$/i, ''))
+    state.customFilters.unshift(...list)
+    persistCustomFilters()
+    state.status = `已导入 ${list.length} 个滤镜`
+    return list.length
+  } catch (err) {
+    state.status = `导入失败：${err instanceof Error ? err.message : err}`
+    throw err
+  }
+}
+
 export async function autoRule(): Promise<void> {
   const r = await api.autoGrade('rule')
   applyAdjustmentDict(r.adjustments)
@@ -416,10 +856,10 @@ export async function autoAI(): Promise<void> {
     openAiSettings()
     return
   }
-  state.status = 'AI 分析中…'
-  const r = await api.autoGrade('ai', state.aiConfig)
+  state.status = state.aiIntent ? 'AI 精修中…' : 'AI 精修中…（未填写要求，由模型自选风格）'
+  const r = await api.autoGrade('ai', state.aiConfig, state.aiIntent)
   applyAdjustmentDict(r.adjustments)
-  state.status = (r.note || '已应用 AI 调色') + `（${r.model}）`
+  state.status = (r.note || '已应用 AI 精修') + `（${r.model}）`
 }
 
 // ------------------------------------------------------------ 取色器（对照旧 PickerPanel 交互）
@@ -494,35 +934,26 @@ export const AI_TARGET_NAMES: Record<AiMaskTarget, string> = {
 }
 
 /** AI 识别蒙版（LR 式「选择主体/人物/背景/天空」）。
- *  本地像素级引擎（SAM2）就绪时默认走本地（图像不出本机、免费），
- *  否则用所配置的视觉大模型（网格分割）。 */
+ *  只走本地像素级引擎（SAM2 + U²-Net）：图像不出本机、免费，不消耗 API。 */
 export async function addAiMask(target: AiMaskTarget): Promise<void> {
   if (!state.loaded || state.aiBusy) return
-  const useLocal = !!state.localAI?.ready
-  if (!useLocal && !aiConfigured()) {
-    state.status = '未配置 AI 模型：请在「AI 设置」中填写 URL / API Key / 模型 ID，或下载本地引擎'
+  if (!state.localAI?.ready) {
+    state.status = '本地蒙版引擎未就绪：请在「AI 设置」里下载本地模型（SAM 2 + U²-Net，约 575MB）'
     openAiSettings()
     return
   }
   state.aiBusy = target
-  state.status = useLocal
-    ? `AI 识别「${AI_TARGET_NAMES[target]}」中…（本地像素级引擎，约 2~10 秒）`
-    : `AI 识别「${AI_TARGET_NAMES[target]}」中…（图像会上传到所配置的端点）`
+  state.status = `AI 识别「${AI_TARGET_NAMES[target]}」中…（本地像素级引擎，约 2~10 秒）`
   try {
-    const r = await api.aiMask(target, state.aiConfig, useLocal ? 'local' : 'vlm')
+    const r = await api.aiMask(target)
     const idx = state.adjustments.masks.length + 1
-    let m: MaskState
-    if (r.mask_png) {
-      m = aiMaskPixels(`AI ${AI_TARGET_NAMES[target]} ${idx}`, target,
-        r.mask_png, r.width ?? 0, r.height ?? 0)
-    } else {
-      m = aiMask(`AI ${AI_TARGET_NAMES[target]} ${idx}`, target,
-        r.grid ?? [], r.width ?? 0, r.height ?? 0)
-    }
+    const m: MaskState = aiMaskPixels(`AI ${AI_TARGET_NAMES[target]} ${idx}`, target,
+      r.mask_png ?? '', r.width ?? 0, r.height ?? 0)
     state.adjustments.masks.push(m)
     state.maskSelected = state.adjustments.masks.length - 1
     state.editMode = 'mask'
-    state.status = `已创建「${AI_TARGET_NAMES[target]}」蒙版（${useLocal ? '像素级' : '网格'}），可直接在右侧做局部调整`
+    state.status = `已创建「${AI_TARGET_NAMES[target]}」蒙版（像素级），可直接在右侧做局部调整`
+    revealMaskOverlay(2400)          // 先亮 2.4 秒让人确认蒙版范围，随后自动收起
     notifyCommitted()
   } catch (err) {
     state.status = `AI 蒙版失败：${err instanceof Error ? err.message : err}`
@@ -544,6 +975,7 @@ export function addMask(kind: MaskKind): void {
   state.adjustments.masks.push(m)
   state.maskSelected = state.adjustments.masks.length - 1
   state.editMode = 'mask'
+  revealMaskOverlay(1600)
   notifyCommitted()
 }
 
@@ -557,6 +989,7 @@ export function selectMask(index: number | null): void {
   if (index !== null) {
     state.editMode = 'mask'
     state.pickTarget = null
+    revealMaskOverlay(1400)
   } else if (state.editMode === 'mask') {
     state.editMode = null
   }
@@ -564,12 +997,42 @@ export function selectMask(index: number | null): void {
 
 export function exitMaskEdit(): void {
   state.maskSelected = null
+  state.maskHover = false
+  state.maskReveal = false
   if (state.editMode === 'mask') state.editMode = null
   state.status = ''
 }
 
 export function toggleMaskOverlay(): void {
   state.maskOverlay = !state.maskOverlay
+  if (!state.maskOverlay) {
+    state.maskHover = false
+    state.maskReveal = false
+  } else {
+    revealMaskOverlay(1600)
+  }
+}
+
+/** 短暂显示红色叠加（新建蒙版后、点「预览」或拖动叠加时）。
+ *  自动收起，避免调参数时红色一直盖在画面上。 */
+let maskRevealTimer: ReturnType<typeof setTimeout> | undefined
+export function revealMaskOverlay(ms = 1600): void {
+  state.maskReveal = true
+  if (maskRevealTimer) clearTimeout(maskRevealTimer)
+  maskRevealTimer = setTimeout(() => { state.maskReveal = false }, ms)
+}
+
+/** 鼠标悬停蒙版条目/图钉时临时显示叠加。 */
+export function setMaskHover(on: boolean): void {
+  state.maskHover = on
+}
+
+/** 当前是否应绘制红色叠加（蒙版选中 + 总开关 + 悬停/短暂显示）。 */
+export function maskOverlayVisible(): boolean {
+  return state.editMode === 'mask'
+    && state.maskSelected !== null
+    && state.maskOverlay
+    && (state.maskHover || state.maskReveal)
 }
 
 export function deleteMask(index: number): void {
@@ -721,7 +1184,7 @@ export async function applyCrop(): Promise<void> {
     state.cropRect = null
     state.cropAngle = 0
     state.status = r.baked ? '已应用裁剪；图章修改已一并合并' : '已应用裁剪'
-    notifyCommitted()
+    notifyCommittedLabeled('裁剪/拉直')
   } catch (err) {
     state.status = `裁剪失败：${err instanceof Error ? err.message : err}`
   } finally {
@@ -738,7 +1201,7 @@ export async function rotate90(clockwise: boolean): Promise<void> {
     state.width = r.width
     state.height = r.height
     state.serial++
-    notifyCommitted()
+    notifyCommittedLabeled(clockwise ? '右转 90°' : '左转 90°')
     state.status = clockwise ? '已右转 90°' : '已左转 90°'
   } catch (err) {
     state.status = `旋转失败：${err instanceof Error ? err.message : err}`

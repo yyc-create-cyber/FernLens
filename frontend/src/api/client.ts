@@ -154,37 +154,69 @@ export const rotateGeometry = (clockwise: boolean, masks: MaskState[]) =>
 export const pickAt = (x: number, y: number, patch = 5) =>
   post<PickResult>('/api/pick', { x, y, patch })
 
-/** 前端「AI 设置」保存的 OpenAI 兼容端点配置（localStorage 持久化）。 */
-export interface AiConfig {
+/** 单个 OpenAI 兼容端点（URL / Key / 模型 ID）。 */
+export interface AiEndpoint {
   baseUrl: string
   apiKey: string
   model: string
 }
 
-export const emptyAiConfig = (): AiConfig => ({ baseUrl: '', apiKey: '', model: '' })
-
-export const aiConfigComplete = (c: AiConfig): boolean =>
-  !!(c.baseUrl.trim() && c.apiKey.trim() && c.model.trim())
-
-function aiConfigPayload(c: AiConfig): Record<string, string> {
-  return { base_url: c.baseUrl.trim(), api_key: c.apiKey.trim(), model: c.model.trim() }
+/** 前端「AI 设置」保存的两套端点（localStorage 持久化）：
+ *  - llm：对话、调色参数、一键精修、AI 蒙版（视觉大模型）
+ *  - image：生图（/images/edits 图生图模型）
+ *  两者可以指向不同厂商，互不影响。 */
+export interface AiConfig {
+  llm: AiEndpoint
+  image: AiEndpoint
+  /** AI 调整强度 0.2..1（默认 0.6）：统一缩放 AI 返回的参数幅度，越小越克制。 */
+  strength: number
 }
 
-/** 测试端点连通性：GET {base}/models，返回可用模型 id 列表。 */
-export const testAiConfig = (cfg: AiConfig) =>
-  post<{ ok: boolean; models: string[] }>('/api/ai/test', { config: aiConfigPayload(cfg) })
+export const emptyAiEndpoint = (): AiEndpoint => ({ baseUrl: '', apiKey: '', model: '' })
 
-/** AI 蒙版识别（vlm=大模型网格 / local=本地像素级 SAM2），返回掩码数据。 */
+/** AI 调整强度的默认值与允许范围（与服务端 auto.AI_DEFAULT_STRENGTH 对应）。 */
+export const AI_STRENGTH_DEFAULT = 0.6
+export const AI_STRENGTH_MIN = 0.2
+export const AI_STRENGTH_MAX = 1
+
+export const emptyAiConfig = (): AiConfig => ({
+  llm: emptyAiEndpoint(), image: emptyAiEndpoint(), strength: AI_STRENGTH_DEFAULT,
+})
+
+export const aiEndpointComplete = (e: AiEndpoint | null | undefined): boolean =>
+  !!(e && e.baseUrl.trim() && e.apiKey.trim() && e.model.trim())
+
+/** 对话/参数（1、2 号功能）是否可用。 */
+export const aiConfigComplete = (c: AiConfig): boolean => aiEndpointComplete(c.llm)
+
+/** 生图（3 号功能）是否可用。 */
+export const aiImageComplete = (c: AiConfig): boolean => aiEndpointComplete(c.image)
+
+function endpointPayload(e: AiEndpoint): Record<string, string> {
+  return { base_url: e.baseUrl.trim(), api_key: e.apiKey.trim(), model: e.model.trim() }
+}
+
+/** 服务端只跑 LLM 侧能力（精修 / 蒙版网格），因此始终传 llm 端点。 */
+function aiConfigPayload(c: AiConfig): Record<string, string> {
+  return endpointPayload(c.llm)
+}
+
+/** 测试单个端点连通性：GET {base}/models，返回可用模型 id 列表。 */
+export const testAiEndpoint = (e: AiEndpoint) =>
+  post<{ ok: boolean; models: string[] }>('/api/ai/test', { config: endpointPayload(e) })
+
+/** 兼容旧调用：测试 LLM 端点。 */
+export const testAiConfig = (c: AiConfig) => testAiEndpoint(c.llm)
+
+/** AI 蒙版识别（本地像素级 SAM2 + U²-Net），返回掩码数据。 */
 export interface AiMaskResult {
   target: string
   model: string
-  // engine=vlm
-  grid?: string[]; width?: number; height?: number
-  // engine=local
   mask_png?: string
+  width?: number; height?: number
 }
-export const aiMask = (target: AiMaskTarget, cfg: AiConfig, engine: 'vlm' | 'local' = 'vlm') =>
-  post<AiMaskResult>('/api/mask/ai', { target, engine, config: aiConfigPayload(cfg) })
+export const aiMask = (target: AiMaskTarget) =>
+  post<AiMaskResult>('/api/mask/ai', { target, engine: 'local' })
 
 // ---- 本地分割模型（SAM2 + U2Net 家族，ONNX）----
 export interface LocalModelsStatus {
@@ -200,9 +232,10 @@ export const getLocalModels = () => req<LocalModelsStatus>('/api/ai/models')
 export const downloadLocalModels = () => post<{ started: boolean; reason?: string }>('/api/ai/models/download', {})
 export const localModelsProgress = () => req<LocalModelsProgress>('/api/ai/models/progress')
 
-export const autoGrade = (mode: 'rule' | 'ai', cfg?: AiConfig) =>
+export const autoGrade = (mode: 'rule' | 'ai', cfg?: AiConfig, intent?: string) =>
   post<{ adjustments: Partial<Adjustments>; note: string; model: string }>(
-    '/api/auto', { mode, config: cfg ? aiConfigPayload(cfg) : undefined })
+    '/api/auto', { mode, config: cfg ? aiConfigPayload(cfg) : undefined,
+      intent: intent ? intent.trim() : undefined, strength: cfg ? cfg.strength : undefined })
 export const fetchHistogram = () => req<HistData>('/api/histogram')
 
 // ---- WebSocket 帧通道 ----
@@ -254,9 +287,9 @@ export class RenderSocket {
     ws.onerror = () => ws.close()
   }
 
-  sendRender(rid: number, kind: 'preview' | 'full', adjustments: unknown): void {
+  sendRender(rid: number, kind: 'preview' | 'full', adjustments: unknown, edge = 0): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'render', rid, kind, adjustments }))
+      this.ws.send(JSON.stringify({ type: 'render', rid, kind, edge, adjustments }))
     }
   }
 

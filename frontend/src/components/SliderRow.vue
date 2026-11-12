@@ -1,7 +1,9 @@
 <script setup lang="ts">
-/** LR 风格滑块行：左标签、右数值、中间零点双向滑轨（拖动实时预览、
- *  松手提交、双击标签/数值复位、右侧重置按钮）。 */
+/** 滑块行（紧凑单行）：标签 · 轨 · 读数。拖动实时预览、松手提交；
+ *  双击标签/读数复位；悬停时读数让位给复位按钮（无布局跳动）；
+ *  偏离默认值时读数转为高亮色，方便一眼扫出“改过哪些”。 */
 import { computed, onBeforeUnmount, ref } from 'vue'
+import Icon from '@/components/Icon'
 
 const props = withDefaults(defineProps<{
   label: string
@@ -30,18 +32,14 @@ const dragging = ref(false)
 
 // 是否双向（有正有负）——决定填充从中心还是从左端起
 const bipolar = computed(() => props.min < 0 && props.max > 0)
+const modified = computed(() => props.modelValue !== props.defaultValue)
 
-function fmt(v: number): string {
-  return v.toFixed(props.decimals) + props.suffix
-}
-const display = computed(() => fmt(props.modelValue))
+const display = computed(() => props.modelValue.toFixed(props.decimals) + props.suffix)
 
-// 当前值在轨道上的百分比位置
 const pct = computed(() => {
   const span = props.max - props.min || 1
   return ((props.modelValue - props.min) / span) * 100
 })
-// 填充区间（双向从中点到滑块；单向从左到滑块）
 const fillStyle = computed(() => {
   if (bipolar.value) {
     const zeroPct = ((0 - props.min) / (props.max - props.min || 1)) * 100
@@ -55,7 +53,6 @@ const fillStyle = computed(() => {
 function snap(v: number): number {
   const stepped = Math.round((v - props.min) / props.step) * props.step + props.min
   const clamped = Math.min(props.max, Math.max(props.min, stepped))
-  // 消除浮点误差，按 decimals 对齐
   return Number(clamped.toFixed(props.decimals))
 }
 
@@ -95,118 +92,99 @@ function reset(): void {
 </script>
 
 <template>
-  <div class="slider-row">
-    <div class="row-head">
-      <span class="label" title="双击复位" @dblclick="reset">{{ label }}</span>
-      <span class="value" title="双击复位" @dblclick="reset">{{ display }}</span>
-      <button class="reset" title="重置" @click="reset">↺</button>
-    </div>
+  <div class="srow" :class="{ modified }">
+    <span class="srow-label" title="双击复位" @dblclick="reset">{{ label }}</span>
     <div
       ref="trackEl"
-      class="track"
+      class="pl-range"
       :class="{ dragging }"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
     >
-      <div class="fill" :style="fillStyle"></div>
-      <div v-if="bipolar" class="zero"></div>
-      <div class="thumb" :style="{ left: pct + '%' }"></div>
+      <div class="pl-fill" :style="fillStyle" />
+      <div v-if="bipolar" class="pl-zero" />
+      <div class="pl-thumb" :style="{ left: pct + '%' }" />
     </div>
+    <span class="srow-val num" title="双击复位" @dblclick="reset">{{ display }}</span>
+    <button class="srow-reset" title="复位" @click="reset">
+      <Icon name="reset" :size="12" />
+    </button>
   </div>
 </template>
 
 <style scoped>
-.slider-row {
-  padding: 4px 0 8px;
-  user-select: none;
-}
-.row-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 5px;
-}
-.label {
-  flex: 1;
-  font-size: 11px;
-  letter-spacing: 0.2px;
-  color: var(--text-2);
-  cursor: default;
-}
-.label:hover { color: var(--text); }
-.value {
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-  min-width: 42px;
-  text-align: right;
-  cursor: default;
-}
-.reset {
-  border: 0;
-  background: transparent;
-  color: var(--text-3);
-  font-size: 12px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 1px;
-  opacity: 0;
-  transition: opacity 0.12s, color 0.12s;
-}
-.slider-row:hover .reset { opacity: 1; }
-.reset:hover { color: var(--accent); }
-
-/* ---- LR 细滑轨 ---- */
-.track {
+.srow {
   position: relative;
-  height: 14px;          /* 触控热区 */
   display: flex;
   align-items: center;
-  cursor: pointer;
-  touch-action: none;
+  gap: 10px;
+  height: 29px;
+  padding: 0 6px 0 0;
+  margin: 0 -6px;
+  border-radius: var(--r-1);
+  user-select: none;
+  transition: background 0.14s var(--ease);
 }
-.track::before {          /* 轨槽 */
+.srow:hover { background: rgba(255, 243, 228, 0.028); }
+/* 改过的参数：左侧一道琥珀刻线，扫一眼就知道哪里动过 */
+.srow.modified::before {
   content: "";
   position: absolute;
-  left: 0; right: 0;
-  height: 3px;
+  left: -8px;
+  top: 50%;
+  width: 2px;
+  height: 12px;
+  margin-top: -6px;
   border-radius: 2px;
-  background: var(--track);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  background: var(--accent);
+  opacity: 0.75;
 }
-.fill {
+.srow-label {
+  width: 58px;
+  flex: none;
+  padding-left: 8px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  letter-spacing: 0.02em;
+  cursor: default;
+  transition: color 0.14s var(--ease);
+  white-space: nowrap;
+}
+.srow:hover .srow-label { color: var(--text); }
+.srow-val {
+  width: 46px;
+  flex: none;
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--text-3);
+  cursor: default;
+  transition: color 0.14s var(--ease), opacity 0.12s var(--ease);
+}
+.srow.modified .srow-val { color: var(--accent-text); }
+.srow:hover .srow-val { opacity: 0; }
+
+/* 复位按钮叠在读数位置上：悬停时不产生任何位移 */
+.srow-reset {
   position: absolute;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--track-fill);
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s var(--ease), color 0.12s var(--ease);
 }
-.zero {                   /* 中间零点刻度 */
-  position: absolute;
-  left: 50%;
-  width: 1px;
-  height: 9px;
-  margin-left: -0.5px;
-  background: var(--border-2);
-}
-.thumb {
-  position: absolute;
-  width: 13px;
-  height: 13px;
-  margin-left: -6.5px;
-  border-radius: 50%;
-  background: linear-gradient(180deg, #e8e8e8, #c8c8c8);
-  border: 1px solid #9a9a9a;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-  transition: transform 0.08s ease, background 0.08s;
-}
-.track:hover .thumb,
-.track.dragging .thumb {
-  background: linear-gradient(180deg, #ffffff, #d6d6d6);
-}
-.track.dragging .thumb {
-  transform: scale(1.12);
-  border-color: var(--accent);
-}
+.srow:hover .srow-reset { opacity: 1; pointer-events: auto; }
+.srow-reset:hover { color: var(--accent); background: var(--accent-soft); }
 </style>

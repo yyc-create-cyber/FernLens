@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 未签名构建不需要这些；一旦你拿到 Apple Developer ID 并开启
+       mac.hardenedRuntime=true + notarize，Electron 需要下列例外才能启动。 -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- 拉起 PyInstaller 打包的 Python sidecar（独立签名/未签名二进制） -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.inherit</key>
+  <true/>
+</dict>
+</plist>

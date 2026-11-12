@@ -356,53 +356,42 @@ def test_ai_endpoints_with_mock():
         cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1].tofile(p)
         _post_json("/api/open", {"path": p})
 
-        # ---- /api/mask/ai：mock segment_ai，验证协议与参数透传 ----
-        calls: list = []
 
-        def fake_segment(rgb8, target, config=None, timeout=120):
-            calls.append((target, config, rgb8.shape))
-            if target == "sky":
-                raise ValueError("画面中未识别到「天空」")
-            gw, gh = 8, 6
-            return {"target": target, "grid": ["11" * (gw // 2)] * gh,
-                    "width": gw, "height": gh, "model": "mock-vl@http://mock/v1"}
-
-        orig_seg = server.auto.segment_ai
-        server.auto.segment_ai = fake_segment
-        try:
-            r = _post_json("/api/mask/ai", {"target": "subject", "config": cfg})
-            assert r.status_code == 200, r.text
-            body = r.json()
-            assert body["target"] == "subject" and body["width"] == 8
-            assert len(body["grid"]) == 6 and set(body["grid"][0]) == {"1"}
-            assert calls[-1][0] == "subject" and calls[-1][1] == cfg
-            assert calls[-1][2] == img.shape          # 识别用当前打开的整图快照
-
-            r = _post_json("/api/mask/ai", {"target": "sky", "config": cfg})
-            assert r.status_code == 400 and "天空" in r.json()["detail"]
-            r = _post_json("/api/mask/ai", {"target": "bogus", "config": cfg})
-            assert r.status_code == 400
-        finally:
-            server.auto.segment_ai = orig_seg
-
-        # ---- /api/auto mode=ai：mock suggest_ai，验证 config 透传 ----
+        # ---- /api/auto mode=ai：mock suggest_ai，验证 config / intent 透传 ----
         orig_suggest = server.auto.suggest_ai
-        server.auto.suggest_ai = lambda rgb8, config=None, timeout=90: (
-            {"exposure": 0.3}, "mock note", f"mock@{config['base_url']}")
+        seen = {}
+
+        def fake_suggest(rgb8, config=None, timeout=90, intent="", strength=0.6):
+            seen["intent"] = intent
+            seen["strength"] = strength
+            return {"exposure": 0.3}, "mock note", f"mock@{config['base_url']}"
+
+        server.auto.suggest_ai = fake_suggest
         try:
-            r = _post_json("/api/auto", {"mode": "ai", "config": cfg})
+            r = _post_json("/api/auto", {"mode": "ai", "config": cfg,
+                                         "intent": "  日系胶片 "})
             assert r.status_code == 200, r.text
             assert r.json()["adjustments"]["exposure"] == 0.3
             assert r.json()["model"] == "mock@http://mock/v1"
+            assert seen["intent"] == "日系胶片", seen
+            assert seen["strength"] == server.auto.AI_DEFAULT_STRENGTH, seen
+
+            # 显式强度透传，且钳制到 0..1
+            r = _post_json("/api/auto", {"mode": "ai", "config": cfg,
+                                        "strength": 0.35})
+            assert r.status_code == 200, r.text
+            assert abs(seen["strength"] - 0.35) < 1e-9, seen
+            r = _post_json("/api/auto", {"mode": "ai", "config": cfg,
+                                        "strength": 9})
+            assert abs(seen["strength"] - 1.0) < 1e-9, seen
         finally:
             server.auto.suggest_ai = orig_suggest
 
 
 def test_ai_mask_requires_image():
-    cfg = {"base_url": "http://mock/v1", "api_key": "k", "model": "m"}
     # 显式清空文档（前面用例都开过图）
     server.doc.__init__()
-    r = _post_json("/api/mask/ai", {"target": "subject", "config": cfg})
+    r = _post_json("/api/mask/ai", {"target": "subject"})
     assert r.status_code == 400 and "未打开图像" in r.json()["detail"]
 
 

@@ -6,6 +6,7 @@ opencv-python>=4.9,<6
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.6            # server.py 直接 import BaseModel（fastapi 也会传递依赖，这里显式声明版本下限）
+python-multipart>=0.0.9  # server.py 的 /api/open-upload 表单上传依赖；缺失时 FastAPI 启动即 RuntimeError
 
 # 可选依赖：缺失不影响基本功能，但会关闭对应特性。
 # 手动安装：  pip install rawpy pyopencl onnxruntime

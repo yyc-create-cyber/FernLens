@@ -4,19 +4,21 @@
  *  负饱和度显示为 hue+180、|sat|；拖轮写回正饱和度与显示角。 */
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   hue: number              // WheelState.hue（度）
   saturation: number       // WheelState.saturation（-100..100）
-}>()
+  discR?: number           // 内盘半径（px），面板按需缩放
+}>(), { discR: 40 })
 
 const emit = defineEmits<{
   (e: 'wheelChange', displayHue: number, displaySat: number): void
   (e: 'released'): void
 }>()
 
-const DISC_R = 40
-const RING_W = 9
+const DISC_R = props.discR
+const RING_W = 8
 const SIZE = (DISC_R + RING_W) * 2 + 6
+const THUMB_R = DISC_R > 30 ? 5 : 4
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 let dragging = false
@@ -57,10 +59,10 @@ function draw(): void {
   // 内盘
   ctx.beginPath()
   ctx.arc(c, c, DISC_R, 0, Math.PI * 2)
-  ctx.fillStyle = '#3a3a3a'
+  ctx.fillStyle = '#171a20'
   ctx.fill()
   ctx.lineWidth = 1
-  ctx.strokeStyle = '#4a4a4a'
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)'
   ctx.stroke()
 
   // 拖动点（y 向上：屏幕 y 取 -sin）
@@ -71,11 +73,11 @@ function draw(): void {
   const dy = c - r * Math.sin(hRad)
   const [sr, sg, sb] = hsvToRgb255(hue / 360, sat, 1)
   ctx.beginPath()
-  ctx.arc(dx, dy, 5, 0, Math.PI * 2)
+  ctx.arc(dx, dy, THUMB_R, 0, Math.PI * 2)
   ctx.fillStyle = `rgb(${sr},${sg},${sb})`
   ctx.fill()
   ctx.lineWidth = 1.5
-  ctx.strokeStyle = '#ececec'
+  ctx.strokeStyle = '#f1f2f5'
   ctx.stroke()
 }
 

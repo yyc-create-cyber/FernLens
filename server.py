@@ -153,7 +153,7 @@ def _mask_from_dict(raw) -> MaskState:
     m.strokes = [[(float(p[0]), float(p[1])) for p in stroke
                   if isinstance(p, (list, tuple)) and len(p) == 2]
                  for stroke in (raw.get("strokes") or [])]
-    # AI 蒙版：VLM 网格（'0'/'1' 字符行）或本地像素掩码（base64 PNG），二选一
+    # AI 蒙版：本地像素掩码（base64 PNG）；旧文档里的网格（'0'/'1' 字符串）仍可读
     if m.kind == "ai":
         try:
             gw = max(0, min(int(raw.get("grid_w") or 0), 512))
@@ -474,7 +474,10 @@ class RenderLoop(threading.Thread):
         self._urgent = None              # 紧急任务槽（保存），不被普通任务覆盖
         self._sources: dict = {}         # kind -> uint8 RGB（私有副本）
         self._src_gen: dict = {}         # kind -> 数据版本号
-        self._lin_cache: dict = {}       # kind -> (gen, 线性光数组)
+        # (kind, edge) -> (gen, 线性光数组)：同一张图会按客户端需要的长边分级缓存
+        # （拖动用低分辨率、停手用显示分辨率、保存用原图），避免每次都重做降采样与转换
+        self._lin_cache: dict = {}
+        self._lin_order: list = []       # 缓存键的插入顺序（超限时淘汰最旧）
         self._stopped = False
         self._req_counter = 0
         if not SYNC_MODE:
@@ -494,25 +497,40 @@ class RenderLoop(threading.Thread):
             if rgb8 is None:
                 self._sources.pop(kind, None)
                 self._src_gen.pop(kind, None)
-                self._lin_cache.pop(kind, None)
+                self._drop_lin(kind)
                 return
             rgb8 = np.array(rgb8, copy=True)
             gen = self._src_gen.get(kind, 0) + 1
             self._sources[kind] = rgb8
             self._src_gen[kind] = gen
-            self._lin_cache.pop(kind, None)
+            self._drop_lin(kind)
+
+    # ------------------------------------------------------------ 分级缓存
+    def _drop_lin(self, kind: str | None = None, keep: int = 3):
+        """清掉缓存：kind 为 None 时按 LRU 只保留最近 keep 级，避免大图吃满内存。"""
+        if kind is None:
+            keys = [k for k in self._lin_order if k in self._lin_cache]
+            for k in keys[:-keep] if keep > 0 else keys:
+                self._lin_cache.pop(k, None)
+            self._lin_order = [k for k in self._lin_order if k in self._lin_cache]
+            return
+        for k in [k for k in self._lin_cache if k[0] == kind]:
+            self._lin_cache.pop(k, None)
+        self._lin_order = [k for k in self._lin_order if k in self._lin_cache]
 
     def submit(self, params: Adjustments, kind: str, urgent: bool = False,
-               client_rid: int | None = None) -> int:
+               client_rid: int | None = None, edge: int = 0) -> int:
         """提交一次处理请求，返回内部请求 id。
 
         urgent 任务（保存）放入独立槽位：即使随后有普通任务提交也保证执行。
+        edge > 0 时按该长边降采样渲染（屏幕只需要这么多像素，省时省内存）。
         """
         with self._cond:
             self._req_counter += 1
             rid = self._req_counter
             job = (rid, kind, params.copy(),
-                   self._req_counter if client_rid is None else int(client_rid))
+                   self._req_counter if client_rid is None else int(client_rid),
+                   max(0, int(edge or 0)))
             if not SYNC_MODE:
                 if urgent:
                     self._urgent = job
@@ -538,22 +556,31 @@ class RenderLoop(threading.Thread):
             self._execute(job)
 
     def _execute(self, job):
-        rid, kind, params, client_rid = job
+        rid, kind, params, client_rid, edge = job
         with self._cond:
             src = self._sources.get(kind)
             gen = self._src_gen.get(kind, -1)
-            cached = self._lin_cache.get(kind)
         if src is None:
             return
+        # edge 比原图还大就没必要放大：当 0 处理
+        long_edge = max(src.shape[0], src.shape[1])
+        if edge >= long_edge:
+            edge = 0
+        key = (kind, edge)
         self.on_busy(True)
         try:
+            with self._cond:
+                cached = self._lin_cache.get(key)
             if cached is not None and cached[0] == gen:
                 lin = cached[1]
             else:
-                lin = rgb8_to_linear_mt(src)
+                small = downscale_max_edge(src, edge) if edge else src
+                lin = rgb8_to_linear_mt(small)
                 with self._cond:           # 期间数据源被更换则丢弃本次缓存
                     if self._src_gen.get(kind, -1) == gen:
-                        self._lin_cache[kind] = (gen, lin)
+                        self._lin_cache[key] = (gen, lin)
+                        self._lin_order = [k for k in self._lin_order if k != key] + [key]
+                        self._drop_lin(None, keep=3)
             out = process_linear(params, lin, should_cancel=lambda: self._stopped)
         except CancelledError:             # 停止请求：静默丢弃半成品
             self.on_busy(False)
@@ -756,8 +783,7 @@ class AiTestReq(BaseModel):
 
 class AiMaskReq(BaseModel):
     target: str                   # subject | person | background | sky
-    config: AiConfig = AiConfig()
-    engine: str = "vlm"           # vlm = 视觉大模型网格；local = 本地像素级（SAM2）
+    engine: str = "local"         # 只保留本地像素级（SAM2 + U²-Net）；字段保留兼容旧前端
 
 
 # ------------------------------------------------------------ 路由
@@ -999,8 +1025,16 @@ def api_auto(req: dict, _=Depends(_auth)):
         d = auto.suggest_rule(doc.source)
         return {"adjustments": d or {}, "note": "", "model": "rule"}
     config = _ai_config_from(req.get("config"))
+    intent = str(req.get("intent") or "").strip()[:600]
+    # 强度：0..1，缺省用 auto 里的默认值（0.6）——模型数值再大也落到克制范围
     try:
-        d, note, model = auto.suggest_ai(doc.source, config)  # 阻塞型，线程池内执行
+        strength = float(req.get("strength"))
+    except (TypeError, ValueError):
+        strength = auto.AI_DEFAULT_STRENGTH
+    strength = max(0.0, min(1.0, strength))
+    try:
+        d, note, model = auto.suggest_ai(  # 阻塞型，线程池内执行
+            doc.source, config, intent=intent, strength=strength)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"adjustments": d or {}, "note": note, "model": model}
@@ -1033,30 +1067,19 @@ def api_ai_test(req: AiTestReq, _=Depends(_auth)):
 def api_mask_ai(req: AiMaskReq, _=Depends(_auth)):
     """AI 蒙版：识别主体/人物/背景/天空，返回掩码数据（前端存入 MaskState）。
 
-    engine=local：本地像素级分割（SAM 2.1 + U²-Net，图像不出本机）；
-    engine=vlm ：视觉大模型网格分割（需「AI 设置」配置端点）。
-    两种引擎的未识别到目标都映射 400，配置/模型问题映射 502。
+    只走本地像素级分割（SAM 2.1 + U²-Net）：图像不出本机、免费、无需配置端点。
+    未识别到目标映射 400，运行环境/模型问题映射 501/502。
     """
     if doc.source is None:
         raise HTTPException(status_code=400, detail="未打开图像")
     with _state_lock:                       # 快照，识别期间允许换图
         src = np.array(doc.source, copy=True)
-    if req.engine == "local":
-        try:
-            return segment.segment_local(src, req.target)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        except NotImplementedError as exc:
-            raise HTTPException(status_code=501, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=str(exc))
-    if req.target not in auto.AI_MASK_TARGETS:
-        raise HTTPException(status_code=400,
-                            detail=f"未知目标：{req.target}")
     try:
-        return auto.segment_ai(src, req.target, req.config.dict_plain())
-    except ValueError as exc:                   # 画面中没有该目标：不算服务错误
+        return segment.segment_local(src, req.target)
+    except ValueError as exc:                   # 未知目标 / 画面中没有该目标
         raise HTTPException(status_code=400, detail=str(exc))
+    except NotImplementedError as exc:          # 未装 onnxruntime / 模型未下载
+        raise HTTPException(status_code=501, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1123,8 +1146,12 @@ async def ws_endpoint(ws: WebSocket, token: str = Query(default="")):
                 rid = int(data.get("rid") or 0)
             except (TypeError, ValueError):
                 continue
+            try:
+                edge = int(data.get("edge") or 0)
+            except (TypeError, ValueError):
+                edge = 0
             params = adjustments_from_dict(data.get("adjustments"))
-            loop.submit(params, kind, client_rid=rid)
+            loop.submit(params, kind, client_rid=rid, edge=edge)
     except WebSocketDisconnect:
         pass
     finally:

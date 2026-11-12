@@ -1,65 +1,294 @@
 /* ============================================================
-   PhotoLab — Lightroom Classic 风格中性灰主题
-   调色板：RGB 三通道均衡的中性灰（无蓝紫偏色），配合 LR 式细滑块、
-   面板标题与精确的小字号排版。
+   PhotoLab — 暗房（Darkroom）设计系统 · v2
+   -----------------------------------------------------------
+   基调：暖中性近黑（不是冷灰），像暗房里被安全灯照过的相纸；
+   层级靠明度 + 1px 暖白描边，强调色只用安全灯的琥珀色，
+   且只出现在选中、焦点、改动过的读数上——不干扰对色彩的判断。
+   字体：Bahnschrift（仪表盘式读数）+ 系统中文；品牌字用衬线。
    ============================================================ */
 :root {
-  /* 表面（由深到浅） */
-  --bg-deep:   #1e1e1e;   /* 应用最底 / 图像外围 */
-  --bg-panel:  #2b2b2b;   /* 主面板、工具栏 */
-  --bg-surf:   #333333;   /* 分区标题、次级面板 */
-  --bg-well:   #242424;   /* 输入框、滑轨、缩略图底 */
-  --bg-hover:  #3a3a3a;   /* 悬停 */
+  color-scheme: dark;
 
-  /* 描边 */
-  --border:    #3d3d3d;   /* 分隔线 */
-  --border-2:  #4a4a4a;   /* 强调描边 */
+  /* 表面（暖中性，由深到浅） */
+  --bg:        #0a0908;   /* 应用底 */
+  --bg-canvas: #060505;   /* 图像外围画布（更黑，让照片浮起来） */
+  --panel:     #100e0c;   /* 面板 */
+  --panel-2:   #16130f;   /* 面板内块 */
+  --raise:     #1e1a16;   /* 悬浮 / 输入 */
+  --well:      #060505;   /* 凹陷（滑轨槽、缩略图底） */
 
-  /* 文本 */
-  --text:      #d4d4d4;   /* 主文本 */
-  --text-2:    #a2a2a2;   /* 标签 / 次级 */
-  --text-3:    #727272;   /* 弱化 / 提示 */
+  /* 描边（暖白，退到几乎不可见） */
+  --line:      rgba(255, 243, 228, 0.065);
+  --line-2:    rgba(255, 243, 228, 0.13);
+  --line-3:    rgba(255, 243, 228, 0.22);
 
-  /* 强调 */
-  --accent:    #4a9eff;   /* 选中 / 可交互（LR 蓝） */
-  --accent-2:  #3a82d6;   /* 按下 */
-  --danger:    #e06c75;   /* 危险 */
-  --warn:      #d9a441;   /* 处理中 */
+  /* 文本（暖白，避免纯白的刺眼） */
+  --text:      #f3ece2;
+  --text-2:    #a89d90;
+  --text-3:    #6d6358;
 
-  /* 滑块 */
-  --track:     #202020;   /* 滑轨槽 */
-  --track-fill:#8f8f8f;   /* 填充 */
-  --thumb:     #dcdcdc;   /* 滑块钮 */
+  /* 强调：安全灯琥珀 */
+  --accent:      #e0a163;
+  --accent-hi:   #f4c191;
+  --accent-soft: rgba(224, 161, 99, 0.13);
+  --accent-line: rgba(224, 161, 99, 0.45);
+  --accent-text: #f7d8b4;
+
+  /* 语义色（低饱和，和暖底同族） */
+  --success: #8fc9a4;
+  --warn:    #e6b463;
+  --danger:  #e08a86;
+
+  /* 滑轨 */
+  --track: rgba(255, 243, 228, 0.10);
+  --fill:  rgba(255, 243, 228, 0.55);
+
+  /* 圆角 */
+  --r-1: 5px;
+  --r-2: 8px;
+  --r-3: 12px;
+
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+
+  /* 字体 */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", -apple-system,
+             "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-display: "Bahnschrift", "DIN Alternate", "Segoe UI Variable Display",
+                  "Microsoft YaHei UI", sans-serif;
+  --font-brand: "Cambria", "Constantia", "Songti SC", "SimSun", serif;
 }
 
 * { box-sizing: border-box; }
+
 html, body, #app {
   height: 100%;
   margin: 0;
   padding: 0;
 }
+
 body {
-  font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  font-size: 12px;
-  background: var(--bg-deep);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.45;
+  background: var(--bg);
   color: var(--text);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-/* LR 风格：数值用等宽数字，便于对齐 */
-.num, .value, .sub-val, .s-val {
+button { font: inherit; color: inherit; }
+::selection { background: rgba(224, 161, 99, 0.28); }
+
+/* 等宽数字：所有读数对齐（仪表盘质感） */
+.num {
+  font-family: var(--font-display);
   font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: 0.02em;
 }
 
-/* 细滚动条 */
+/* ---- 细滚动条：几乎隐形，悬停才显形 ---- */
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb {
-  background: #4a4a4a;
-  border-radius: 5px;
+  background: rgba(255, 243, 228, 0.07);
+  border-radius: 99px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
-::-webkit-scrollbar-thumb:hover { background: #606060; background-clip: padding-box; border: 2px solid transparent; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 243, 228, 0.17); background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ============================================================
+   通用控件
+   ============================================================ */
+
+/* ---- 按钮 ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  font-family: var(--font-ui);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease),
+              border-color 0.16s var(--ease), opacity 0.16s var(--ease),
+              box-shadow 0.16s var(--ease);
+}
+.btn:hover:not(:disabled) {
+  background: rgba(255, 243, 228, 0.055);
+  color: var(--text);
+}
+.btn:active:not(:disabled) { background: rgba(255, 243, 228, 0.085); }
+.btn:disabled { opacity: 0.28; cursor: default; }
+.btn.on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.btn.on:hover:not(:disabled) { background: rgba(224, 161, 99, 0.2); color: #ffe6c9; }
+
+/* 主操作：奶油色实底 + 细内高光，像相纸标签 */
+.btn.solid {
+  background: linear-gradient(180deg, #f6f0e8, #e6dcce);
+  color: #14100c;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.5) inset, 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.btn.solid:hover:not(:disabled) {
+  background: linear-gradient(180deg, #fffaf3, #f0e6d8);
+  color: #14100c;
+}
+.btn.outline { box-shadow: inset 0 0 0 1px var(--line-2); }
+.btn.outline:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--line-3); }
+.btn.icon { width: 30px; padding: 0; justify-content: center; }
+
+/* ---- 分段控件 ---- */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-2);
+  background: rgba(255, 243, 228, 0.04);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.seg > button {
+  height: 22px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease);
+}
+.seg > button:hover { color: var(--text-2); }
+.seg > button.on {
+  background: rgba(255, 243, 228, 0.10);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+/* ---- 小按钮（面板内） ---- */
+.mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 23px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--r-1);
+  background: rgba(255, 243, 228, 0.045);
+  color: var(--text-2);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease);
+}
+.mini:hover { background: rgba(255, 243, 228, 0.1); color: var(--text); }
+.mini.on { background: var(--accent-soft); color: var(--accent-text); }
+.mini.danger:hover { background: rgba(224, 138, 134, 0.16); color: var(--danger); }
+.mini.square { width: 23px; padding: 0; gap: 0; }
+
+/* ---- 滑轨（SliderRow 与 MiniSlider 共用） ---- */
+.pl-range {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+.pl-range::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--track);
+}
+.pl-fill {
+  position: absolute;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--fill);
+  transition: background 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+/* 中心刻线：双向参数的“零位” */
+.pl-zero {
+  position: absolute;
+  left: 50%;
+  width: 1px;
+  height: 8px;
+  margin-left: -0.5px;
+  background: rgba(255, 243, 228, 0.18);
+}
+.pl-thumb {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  margin-left: -5.5px;
+  border-radius: 50%;
+  background: #f6efe6;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7), 0 0 0 0.5px rgba(0, 0, 0, 0.5);
+  transition: transform 0.13s var(--ease), box-shadow 0.13s var(--ease);
+}
+.pl-range:hover .pl-thumb { transform: scale(1.16); }
+.pl-range.dragging .pl-fill {
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(224, 161, 99, 0.45);
+}
+.pl-range.dragging .pl-thumb {
+  transform: scale(1.3);
+  background: #fffaf2;
+  box-shadow: 0 0 0 4px rgba(224, 161, 99, 0.18), 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
+/* ---- 键盘提示 ---- */
+.kbd {
+  display: inline-block;
+  min-width: 16px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 243, 228, 0.06);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.4);
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: 10px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 图标 ---- */
+.pl-icon { display: block; flex: none; }
+.btn .pl-icon { opacity: 0.85; }
+.btn:hover .pl-icon { opacity: 1; }
+
+/* ---- 面板区块标题（小号字距标签，暗房仪表感） ---- */
+.block-title,
+.side-title {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}

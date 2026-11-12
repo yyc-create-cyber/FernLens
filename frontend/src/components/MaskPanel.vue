@@ -4,6 +4,8 @@
 import { NSwitch } from 'naive-ui'
 import MiniSlider from '@/components/MiniSlider.vue'
 import Icon from '@/components/Icon'
+import { HINT } from '@/lib/hints'
+import { vTip } from '@/lib/tip'
 import { useEditor, notifyChanged, notifyCommitted,
          addMask, selectMask, deleteMask, undoBrushStroke, clearBrushStrokes,
          exitMaskEdit, toggleMaskOverlay, revealMaskOverlay, setMaskHover,
@@ -42,9 +44,12 @@ function setGeom(i: number, field: 'feather' | 'size' | 'radius' | 'aspect' | 'a
     <div class="block">
       <div class="block-title">手动新建</div>
       <div class="grid3">
-        <button class="chip" @click="addMask('linear')"><Icon name="linear" :size="13" />线性</button>
-        <button class="chip" @click="addMask('radial')"><Icon name="radial" :size="13" />径向</button>
-        <button class="chip" @click="addMask('brush')"><Icon name="brush" :size="13" />画笔</button>
+        <button v-tip="HINT.maskLinear" class="chip" @click="addMask('linear')">
+          <Icon name="linear" :size="13" />线性</button>
+        <button v-tip="HINT.maskRadial" class="chip" @click="addMask('radial')">
+          <Icon name="radial" :size="13" />径向</button>
+        <button v-tip="HINT.maskBrushKind" class="chip" @click="addMask('brush')">
+          <Icon name="brush" :size="13" />画笔</button>
       </div>
     </div>
 
@@ -86,7 +91,8 @@ function setGeom(i: number, field: 'feather' | 'size' | 'radius' | 'aspect' | 'a
             <button class="mini accent" title="退出局部编辑（Esc）" @click="exitMaskEdit()">完成</button>
           </div>
 
-          <MiniSlider v-if="m.kind !== 'ai'" label="羽化" :value="m.feather" :min="0" :max="100"
+          <MiniSlider v-if="m.kind !== 'ai'" label="羽化" :hint="HINT.maskFeather"
+                      :value="m.feather" :min="0" :max="100"
                       :label-width="52"
                       @update:value="(v: number) => setGeom(i, 'feather', v)" />
           <div v-else class="hint-row">
@@ -109,7 +115,8 @@ function setGeom(i: number, field: 'feather' | 'size' | 'radius' | 'aspect' | 'a
           </div>
 
           <template v-if="m.kind === 'linear'">
-            <MiniSlider label="角度" :value="linearMaskAngle(m)" :min="0" :max="360" :step="0.5"
+            <MiniSlider label="角度" :hint="HINT.maskAngle" :value="linearMaskAngle(m)"
+                        :min="0" :max="360" :step="0.5"
                         :decimals="1" suffix="°" :label-width="52"
                         @update:value="(v: number) => setLinearMaskAngle(i, v)" />
             <div class="btn-row">
@@ -126,19 +133,23 @@ function setGeom(i: number, field: 'feather' | 'size' | 'radius' | 'aspect' | 'a
           </template>
 
           <template v-if="m.kind === 'radial'">
-            <MiniSlider label="半径" :value="m.radius" :min="0.02" :max="1.5" :step="0.005"
+            <MiniSlider label="半径" :hint="HINT.maskRadius" :value="m.radius"
+                        :min="0.02" :max="1.5" :step="0.005"
                         :decimals="2" :label-width="52"
                         @update:value="(v: number) => setGeom(i, 'radius', v)" />
-            <MiniSlider label="长宽比" :value="m.aspect" :min="0.1" :max="5" :step="0.02"
+            <MiniSlider label="长宽比" :hint="HINT.maskAspect" :value="m.aspect"
+                        :min="0.1" :max="5" :step="0.02"
                         :decimals="2" :label-width="52"
                         @update:value="(v: number) => setGeom(i, 'aspect', v)" />
-            <MiniSlider label="旋转" :value="m.angle" :min="0" :max="360" :step="0.5"
+            <MiniSlider label="旋转" :hint="HINT.maskRotate" :value="m.angle"
+                        :min="0" :max="360" :step="0.5"
                         :decimals="0" suffix="°" :label-width="52"
                         @update:value="(v: number) => setGeom(i, 'angle', v)" />
           </template>
 
           <template v-if="m.kind === 'brush'">
-            <MiniSlider label="笔刷" :value="m.size" :min="1" :max="100" :step="1"
+            <MiniSlider label="笔刷" :hint="HINT.maskBrush" :value="m.size"
+                        :min="1" :max="100" :step="1"
                         :label-width="52"
                         @update:value="(v: number) => setGeom(i, 'size', v)" />
             <div class="btn-row">

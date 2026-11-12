@@ -2,6 +2,7 @@
 /** 紧凑滑块（面板内用）：标签 · 轨 · 读数，拖动即回调 update:value。
  *  与 SliderRow 共用全局 .pl-range 轨道样式，只做“受控输入”这一件事。 */
 import { computed, onBeforeUnmount, ref } from 'vue'
+import { vTip } from '@/lib/tip'
 
 const props = withDefaults(defineProps<{
   label?: string
@@ -12,12 +13,14 @@ const props = withDefaults(defineProps<{
   decimals?: number
   suffix?: string
   labelWidth?: number
+  hint?: string
 }>(), {
   label: '',
   step: 1,
   decimals: 0,
   suffix: '',
   labelWidth: 56,
+  hint: '',
 })
 
 const emit = defineEmits<{
@@ -74,7 +77,8 @@ onBeforeUnmount(() => { dragging.value = false })
 
 <template>
   <div class="mrow">
-    <span v-if="label" class="mrow-label" :style="{ width: labelWidth + 'px' }">{{ label }}</span>
+    <span v-if="label" v-tip="hint" class="mrow-label" :class="{ 'has-hint': hint }"
+          :style="{ width: labelWidth + 'px' }">{{ label }}</span>
     <div
       ref="trackEl"
       class="pl-range"
@@ -107,6 +111,12 @@ onBeforeUnmount(() => { dragging.value = false })
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
+.mrow-label.has-hint {
+  cursor: help;
+  text-decoration: underline dotted rgba(255, 243, 228, 0.2);
+  text-underline-offset: 3px;
+}
+.mrow-label.has-hint:hover { text-decoration-color: var(--accent-line); color: var(--text); }
 .mrow-val {
   width: 44px;
   flex: none;

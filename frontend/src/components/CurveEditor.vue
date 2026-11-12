@@ -2,9 +2,10 @@
 /** 曲线编辑器：对照旧 ui_widgets.CurveEditor。
  *  四通道（RGB/红/绿/蓝），网格 + 虚线对角线 + 直方图背景，其它通道淡色上下文；
  *  左键拖点（端点钉在 x=0/1）、空白处按下即加点并直接拖动、双击加点、右键删点（端点除外）。 */
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { buildLut } from '@/lib/curve'
 import { CURVE_CHANNEL_COLORS, CURVE_CHANNEL_LABELS } from '@/lib/presets'
+import { vTip } from '@/lib/tip'
 import type { CurveChannel, CurvePoints } from '@/api/types'
 import { CURVE_CHANNELS, defaultCurves } from '@/api/types'
 import Icon from '@/components/Icon'
@@ -29,6 +30,16 @@ const GAP = 1 / 512
 const wrap = ref<HTMLDivElement | null>(null)
 const canvas = ref<HTMLCanvasElement | null>(null)
 const channel = ref<CurveChannel>('master')
+
+/* 曲线通道说明：主通道改明暗，单通道改颜色倾向——这是最容易用错的地方，
+   所以每个通道各给一句，悬停曲线区域时按当前通道显示。 */
+const CHANNEL_HINT: Record<string, string> = {
+  master: '主通道：改整体明暗映射。往左上拉整体变亮，往右下压变暗；S 形曲线（暗部压、亮部提）加对比，反 S 降对比。',
+  red: '红通道：曲线上移加红、下移减红（等价于加青）。适合修肤色偏红或天空偏品红。',
+  green: '绿通道：上移加绿、下移加品红。白平衡微调后仍偏绿时用它校正。',
+  blue: '蓝通道：上移加蓝、下移加黄。给阴影加蓝、给高光加黄是最常用的「电影感」手法。',
+}
+const channelHint = computed(() => CHANNEL_HINT[channel.value] || '')
 
 let dragIndex: number | null = null
 let selected: number | null = null
@@ -315,7 +326,7 @@ function resetChannel(): void {
       >{{ CURVE_CHANNEL_LABELS[ch] }}</button>
       <button class="ch-reset" title="复位当前通道" @click="resetChannel"><Icon name="reset" :size="12" /></button>
     </div>
-    <div ref="wrap" class="plot">
+    <div ref="wrap" v-tip="channelHint" class="plot has-hint">
       <canvas
         ref="canvas"
         @mousedown="onMouseDown"
@@ -381,4 +392,24 @@ function resetChannel(): void {
   height: 100%;
   cursor: crosshair;
 }
+
+/* 有说明的区域：右下角一枚极淡的问号，暗示可以停一下看解释 */
+.plot.has-hint::after {
+  content: "?";
+  position: absolute;
+  right: 6px;
+  bottom: 5px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: rgba(255, 243, 228, 0.06);
+  color: var(--text-3);
+  font-family: var(--font-display);
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+  pointer-events: none;
+  transition: color 0.14s var(--ease), background 0.14s var(--ease);
+}
+.plot.has-hint:hover::after { color: var(--accent); background: var(--accent-soft); }
 </style>

@@ -292,3 +292,61 @@ button { font: inherit; color: inherit; }
   text-transform: uppercase;
   color: var(--text-3);
 }
+
+/* ============================================================
+   悬浮提示气泡（v-tip）
+   ------------------------------------------------------------
+   挂在 body 上的单例，position: fixed，不受面板 overflow 裁剪。
+   暖黑底 + 琥珀描边，和暗房主题同族；箭头跟着目标中心走。
+   ============================================================ */
+.pl-tip {
+  position: fixed;
+  z-index: 9999;
+  top: 0;
+  left: 0;
+  max-width: 280px;
+  padding: 7px 10px 8px;
+  border-radius: var(--r-2);
+  background: #1a1613;
+  background-image: linear-gradient(180deg, rgba(255, 243, 228, 0.045), transparent 60%);
+  box-shadow:
+    inset 0 0 0 1px rgba(224, 161, 99, 0.22),
+    0 8px 22px rgba(0, 0, 0, 0.62),
+    0 1px 0 rgba(255, 243, 228, 0.05);
+  color: #ded3c6;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  line-height: 1.62;
+  letter-spacing: 0.015em;
+  white-space: normal;
+  text-align: left;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(3px) scale(0.985);
+  transition: opacity 0.13s var(--ease), transform 0.13s var(--ease);
+}
+.pl-tip.on {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+.pl-tip.below { transform: translateY(-3px) scale(0.985); }
+.pl-tip.below.on { transform: translateY(0) scale(1); }
+
+.pl-tip-arrow {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  background: #1a1613;
+  border-right: 1px solid rgba(224, 161, 99, 0.22);
+  border-bottom: 1px solid rgba(224, 161, 99, 0.22);
+  transform: rotate(45deg);
+  bottom: -4px;
+}
+.pl-tip.below .pl-tip-arrow {
+  bottom: auto;
+  top: -4px;
+  border: 0;
+  border-left: 1px solid rgba(224, 161, 99, 0.22);
+  border-top: 1px solid rgba(224, 161, 99, 0.22);
+}

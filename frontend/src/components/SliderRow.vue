@@ -4,6 +4,7 @@
  *  偏离默认值时读数转为高亮色，方便一眼扫出“改过哪些”。 */
 import { computed, onBeforeUnmount, ref } from 'vue'
 import Icon from '@/components/Icon'
+import { vTip } from '@/lib/tip'
 
 const props = withDefaults(defineProps<{
   label: string
@@ -14,11 +15,14 @@ const props = withDefaults(defineProps<{
   step?: number
   decimals?: number
   suffix?: string
+  /** 悬浮说明（鼠标停在标签上 0.26s 后弹出） */
+  hint?: string
 }>(), {
   defaultValue: 0,
   step: 1,
   decimals: 0,
   suffix: '',
+  hint: '',
 })
 
 const emit = defineEmits<{
@@ -93,7 +97,8 @@ function reset(): void {
 
 <template>
   <div class="srow" :class="{ modified }">
-    <span class="srow-label" title="双击复位" @dblclick="reset">{{ label }}</span>
+    <span v-tip="hint" class="srow-label" :class="{ 'has-hint': hint }"
+          title="双击复位" @dblclick="reset">{{ label }}</span>
     <div
       ref="trackEl"
       class="pl-range"
@@ -152,6 +157,13 @@ function reset(): void {
   transition: color 0.14s var(--ease);
   white-space: nowrap;
 }
+/* 有说明的标签：虚线下划线暗示「可以停一下看看」 */
+.srow-label.has-hint {
+  cursor: help;
+  text-decoration: underline dotted rgba(255, 243, 228, 0.22);
+  text-underline-offset: 3px;
+}
+.srow-label.has-hint:hover { text-decoration-color: var(--accent-line); }
 .srow:hover .srow-label { color: var(--text); }
 .srow-val {
   width: 46px;

@@ -20,6 +20,7 @@ import FilterPanel from '@/components/FilterPanel.vue'
 import AiSettings from '@/components/AiSettings.vue'
 import AiChat from '@/components/AiChat.vue'
 import Icon from '@/components/Icon'
+import { HINT } from '@/lib/hints'
 import {
   useEditor, resetAll, notifyChanged, notifyCommitted,
   toggleBlackwhite, saveBrowser, autoRule, autoAI, cancelPick, deletePicker,
@@ -389,7 +390,8 @@ const themeOverrides = {
           <button class="btn outline">比例 · {{ aspectLabel }} <Icon name="chevron" :size="12" /></button>
         </NDropdown>
         <div class="sub-slider">
-          <MiniSlider label="拉直" :value="store.cropAngle" :min="-45" :max="45" :step="0.1"
+          <MiniSlider label="拉直" :hint="HINT.cropAngle" :value="store.cropAngle"
+                      :min="-45" :max="45" :step="0.1"
                       :decimals="1" suffix="°" :label-width="30"
                       @update:value="(v: number) => { store.cropAngle = v; notifyChanged() }" />
         </div>
@@ -402,7 +404,8 @@ const themeOverrides = {
       <!-- 图章条 -->
       <div v-if="stampActive" class="subbar">
         <div class="sub-slider">
-          <MiniSlider label="羽化" :value="store.stampFeather" :min="0" :max="100"
+          <MiniSlider label="羽化" :hint="HINT.stampFeather" :value="store.stampFeather"
+                      :min="0" :max="100"
                       :label-width="30"
                       @update:value="(v: number) => store.stampFeather = v" />
         </div>
@@ -453,40 +456,42 @@ const themeOverrides = {
 
             <template v-else>
               <div v-if="tab === 'light'" class="stack">
-                <SliderRow label="曝光" :min="-5" :max="5" :step="0.01" :decimals="2" suffix=" EV"
+                <SliderRow label="曝光" :hint="HINT.exposure"
+                           :min="-5" :max="5" :step="0.01" :decimals="2" suffix=" EV"
                            v-model="target.exposure" @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="对比度" :min="-100" :max="100" v-model="target.contrast"
+                <SliderRow label="对比度" :hint="HINT.contrast" :min="-100" :max="100" v-model="target.contrast"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="高光" :min="-100" :max="100" v-model="target.highlights"
+                <SliderRow label="高光" :hint="HINT.highlights" :min="-100" :max="100" v-model="target.highlights"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="阴影" :min="-100" :max="100" v-model="target.shadows"
+                <SliderRow label="阴影" :hint="HINT.shadows" :min="-100" :max="100" v-model="target.shadows"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="白色" :min="-100" :max="100" v-model="target.whites"
+                <SliderRow label="白色" :hint="HINT.whites" :min="-100" :max="100" v-model="target.whites"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="黑色" :min="-100" :max="100" v-model="target.blacks"
+                <SliderRow label="黑色" :hint="HINT.blacks" :min="-100" :max="100" v-model="target.blacks"
                            @input="notifyChanged" @release="notifyCommitted" />
               </div>
 
               <div v-else-if="tab === 'color'" class="stack">
-                <SliderRow label="色温" :min="-100" :max="100" v-model="target.temperature"
+                <SliderRow label="色温" :hint="HINT.temperature" :min="-100" :max="100" v-model="target.temperature"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="色调" :min="-100" :max="100" v-model="target.tint"
+                <SliderRow label="色调" :hint="HINT.tint" :min="-100" :max="100" v-model="target.tint"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="饱和度" :min="-100" :max="100" v-model="target.saturation"
+                <SliderRow label="饱和度" :hint="HINT.saturation" :min="-100" :max="100" v-model="target.saturation"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow v-if="!isMaskTarget" label="自然饱和度" :min="-100" :max="100"
+                <SliderRow v-if="!isMaskTarget" label="自然饱和度" :hint="HINT.vibrance"
+                           :min="-100" :max="100"
                            v-model="store.adjustments.vibrance"
                            @input="notifyChanged" @release="notifyCommitted" />
               </div>
 
               <div v-else-if="tab === 'effects'" class="stack">
-                <SliderRow label="清晰度" :min="-100" :max="100" v-model="target.clarity"
+                <SliderRow label="清晰度" :hint="HINT.clarity" :min="-100" :max="100" v-model="target.clarity"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="降噪" :min="0" :max="100" v-model="target.denoise"
+                <SliderRow label="降噪" :hint="HINT.denoise" :min="0" :max="100" v-model="target.denoise"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="锐度" :min="0" :max="100" v-model="target.sharpen"
+                <SliderRow label="锐度" :hint="HINT.sharpen" :min="0" :max="100" v-model="target.sharpen"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="去朦胧" :min="-100" :max="100" v-model="target.dehaze"
+                <SliderRow label="去朦胧" :hint="HINT.dehaze" :min="-100" :max="100" v-model="target.dehaze"
                            @input="notifyChanged" @release="notifyCommitted" />
                 <p class="pane-tip">降噪分亮/色两路：色度重滤去色斑，亮度轻滤保纹理。</p>
               </div>

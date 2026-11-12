@@ -8,6 +8,8 @@ import ColorWheel from '@/components/ColorWheel.vue'
 import SliderRow from '@/components/SliderRow.vue'
 import { notifyChanged, notifyCommitted } from '@/stores/editor'
 import { RANGE_LABELS } from '@/lib/presets'
+import { HINT } from '@/lib/hints'
+import { vTip } from '@/lib/tip'
 import type { AdjustmentsLike, GradingRange } from '@/api/types'
 import { GRADING_RANGES } from '@/api/types'
 
@@ -41,7 +43,7 @@ function onWheelChange(range: GradingRange, displayHue: number, displaySat: numb
           @wheel-change="(h: number, s: number) => onWheelChange(range, h, s)"
           @released="notifyCommitted"
         />
-        <span class="caption">{{ RANGE_LABELS[range] }}</span>
+        <span v-tip="HINT.gradingEdge" class="caption">{{ RANGE_LABELS[range] }}</span>
       </div>
     </div>
 
@@ -51,13 +53,15 @@ function onWheelChange(range: GradingRange, displayHue: number, displaySat: numb
         <span class="p-title">{{ RANGE_LABELS[active] }}</span>
         <span class="p-hue num">H {{ activeWheel.hue.toFixed(0) }}°</span>
       </div>
-      <SliderRow label="饱和度" :min="-100" :max="100"
+      <SliderRow label="饱和度" :hint="HINT.gradingEdge" :min="-100" :max="100"
                  v-model="activeWheel.saturation"
                  @input="notifyChanged" @release="notifyCommitted" />
-      <SliderRow label="亮度" :min="-100" :max="100"
+      <SliderRow label="亮度" :hint="'只改变该亮度区间的明暗：+ 让这部分更亮更前置，− 让它沉下去。不影响其它区间。'"
+                 :min="-100" :max="100"
                  v-model="activeWheel.luminance"
                  @input="notifyChanged" @release="notifyCommitted" />
-      <SliderRow label="混合" :min="0" :max="100" :default-value="50"
+      <SliderRow label="混合" :hint="'控制各亮度区间之间的过渡软硬。0 硬切（界限分明，适合强风格），100 最大平滑（过渡自然）。'"
+                 :min="0" :max="100" :default-value="50"
                  v-model="adj.blend"
                  @input="notifyChanged" @release="notifyCommitted" />
     </div>
@@ -92,6 +96,9 @@ function onWheelChange(range: GradingRange, displayHue: number, displaySat: numb
   letter-spacing: 0.3px;
   color: var(--text-3);
   user-select: none;
+  cursor: help;
+  text-decoration: underline dotted rgba(255, 243, 228, 0.16);
+  text-underline-offset: 3px;
   transition: color 0.14s var(--ease);
 }
 .cell.engaged .caption { color: var(--text-2); }

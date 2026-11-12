@@ -6,6 +6,7 @@ import type { PickerState } from '@/api/types'
 import MiniSlider from '@/components/MiniSlider.vue'
 import Icon from '@/components/Icon'
 import { HS_PRESETS, presetColor } from '@/lib/presets'
+import { HINT } from '@/lib/hints'
 import { useEditor, notifyChanged, notifyCommitted,
          armNewPick, armRepick, cancelPick, newPresetPicker, deletePicker } from '@/stores/editor'
 
@@ -83,16 +84,20 @@ const hint = computed(() => {
         </button>
       </div>
       <div class="row-sliders">
-        <MiniSlider label="影响范围" :value="p.span" :min="5" :max="180" :label-width="52" suffix="°"
+        <MiniSlider label="影响范围" :hint="HINT.pickerSpan" :value="p.span"
+                    :min="5" :max="180" :label-width="52" suffix="°"
                     @update:value="(v: number) => setField(i, 'span', v)"
                     @release="notifyCommitted" />
-        <MiniSlider label="色相偏移" :value="p.hue_shift" :min="-60" :max="60" :label-width="52" suffix="°"
+        <MiniSlider label="色相偏移" :hint="HINT.pickerHue" :value="p.hue_shift"
+                    :min="-60" :max="60" :label-width="52" suffix="°"
                     @update:value="(v: number) => setField(i, 'hue_shift', v)"
                     @release="notifyCommitted" />
-        <MiniSlider label="饱和度" :value="p.saturation" :min="-100" :max="100" :label-width="52"
+        <MiniSlider label="饱和度" :hint="HINT.pickerSat" :value="p.saturation"
+                    :min="-100" :max="100" :label-width="52"
                     @update:value="(v: number) => setField(i, 'saturation', v)"
                     @release="notifyCommitted" />
-        <MiniSlider label="明亮度" :value="p.luminance" :min="-100" :max="100" :label-width="52"
+        <MiniSlider label="明亮度" :hint="HINT.pickerLum" :value="p.luminance"
+                    :min="-100" :max="100" :label-width="52"
                     @update:value="(v: number) => setField(i, 'luminance', v)"
                     @release="notifyCommitted" />
       </div>

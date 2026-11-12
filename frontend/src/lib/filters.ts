@@ -5,7 +5,7 @@
 import type {
   Adjustments, Curves, GradingRange, WheelState,
 } from '@/api/types'
-import { CURVE_CHANNELS, GRADING_RANGES, TONE_FIELDS, defaultCurves } from '@/api/types'
+import { CURVE_CHANNELS, GRADING_RANGES, TONE_FIELDS, defaultCurves, defaultWheels } from '@/api/types'
 
 /** 滤镜覆盖的全部全局字段 = TONE_FIELDS（11 个）+ 效果四件套。 */
 export const LOOK_FIELDS = [
@@ -64,7 +64,19 @@ export function lookFromAdjustments(adj: Adjustments): FilterLook {
   return look
 }
 
-/** 把 look 合并进参数（只覆盖 look 里出现的字段；蒙版/取色点保持不动）。 */
+/** 把全局影调/曲线/分级恢复到默认值（滤镜是「独占地」套用的，不是叠加）。
+ *  只碰全局参数：蒙版、取色点、裁剪、图章一律不动。 */
+export function resetGlobalLook(adj: Adjustments): void {
+  for (const f of LOOK_FIELDS) {
+    ;(adj as unknown as Record<string, number>)[f] = 0
+  }
+  adj.curves = defaultCurves()
+  adj.blend = 50
+  adj.wheels = defaultWheels()
+}
+
+/** 把 look 合并进参数（只覆盖 look 里出现的字段；蒙版/取色点保持不动）。
+ *  单独调用时是「叠加」语义；滤镜面板走 resetGlobalLook + applyLook，保证独占。 */
 export function applyLook(adj: Adjustments, look: FilterLook): void {
   for (const f of LOOK_FIELDS) {
     const v = look[f]

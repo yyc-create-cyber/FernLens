@@ -14,7 +14,7 @@ import type { AiConfig, HistData, LibraryItem, LocalModelsStatus, RectNorm, Serv
 import { presetColor, CURVE_CHANNEL_LABELS, RANGE_LABELS } from '@/lib/presets'
 import {
   BUILTIN_FILTERS, applyLook, downloadJson, filterFileName, filterToFile,
-  lookFromAdjustments, parseFilterFile, sanitizeLook,
+  lookFromAdjustments, parseFilterFile, resetGlobalLook, sanitizeLook,
 } from '@/lib/filters'
 import type { FilterPreset } from '@/lib/filters'
 
@@ -774,16 +774,19 @@ export function allFilters(): FilterPreset[] {
   return [...BUILTIN_FILTERS, ...state.customFilters]
 }
 
-/** 套用滤镜：只覆盖全局影调/曲线/分级，蒙版与取色点不动。 */
+/** 套用滤镜：独占语义——先把全局影调/曲线/分级复位到默认，再写入滤镜 look，
+ *  所以任意时刻只有一个滤镜生效，换滤镜不会把两者叠在一起。
+ *  蒙版、取色点、裁剪/图章仍不受影响（它们属于具体画面，不属于滤镜）。 */
 export function applyFilter(p: FilterPreset): void {
   if (!state.loaded) return
   if (state.maskSelected !== null) exitMaskEdit()      // 滤镜是全局的，先退出局部编辑
   filterApplying = true
   try {
+    resetGlobalLook(state.adjustments)
     applyLook(state.adjustments, p.look)
     state.activeFilter = p.id
     notifyCommittedLabeled(`滤镜 · ${p.name}`)
-    state.status = `已应用滤镜「${p.name}」`
+    state.status = `已应用滤镜「${p.name}」· 替换之前的滤镜（可撤销）`
   } finally {
     filterApplying = false
   }

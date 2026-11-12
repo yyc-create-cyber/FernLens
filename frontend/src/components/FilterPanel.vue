@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 滤镜面板：基础预设 + 自定义滤镜。
- *  套用只改全局影调/曲线/分级（不动蒙版/取色点），可撤销（历史里记为「滤镜 · 名字」）。
+ *  套用是独占的：每次只保留一个滤镜，换滤镜会先复位全局影调/曲线/分级再套新的，
+ *  所以不会和上一个滤镜叠加。不动蒙版/取色点；可撤销（历史里记为「滤镜 · 名字」）。
  *  自定义滤镜存 localStorage，可导出/导入 JSON。 */
 import { computed, nextTick, ref } from 'vue'
 import Icon from '@/components/Icon'
@@ -92,6 +93,10 @@ async function onFileChosen(e: Event): Promise<void> {
       <p>
         只有全局影调（曝光 / 对比 / 高光 / 阴影 / 白平衡 / 饱和度等）、效果（清晰度 / 降噪 / 锐度 / 去朦胧）、
         曲线与分级色轮。
+      </p>
+      <p>
+        <strong>一次只套用一个</strong>：点另一个滤镜会先复位再套用，不会和上一个叠加；
+        想叠加请直接手动调参数。
       </p>
       <p class="fp-note-warn">
         不含蒙版（含 AI 识别蒙版）、取色点、仿制图章、裁剪/旋转，也不含局部调整与历史记录。

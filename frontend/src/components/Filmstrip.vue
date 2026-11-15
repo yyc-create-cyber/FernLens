@@ -36,7 +36,9 @@ const store = useEditor()
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
-  background: var(--panel);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-top: 1px solid var(--line);
 }
 .rail {
@@ -61,18 +63,18 @@ const store = useEditor()
 }
 .cell:hover {
   transform: translateY(-2px);
-  box-shadow: inset 0 0 0 1px var(--line-2), 0 8px 18px rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 0 0 1px var(--line-2), 0 6px 14px rgba(0, 0, 0, 0.25);
 }
 .cell.current {
-  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 2px rgba(224, 161, 99, 0.16),
-              0 8px 18px rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 2px var(--accent-soft),
+              0 6px 14px rgba(0, 0, 0, 0.25);
 }
 .cell.current::after {
   content: "";
   position: absolute;
   inset: 0;
   pointer-events: none;
-  box-shadow: inset 0 0 22px rgba(224, 161, 99, 0.12);
+  box-shadow: inset 0 0 18px var(--accent-soft);
 }
 .cell img {
   width: 100%;

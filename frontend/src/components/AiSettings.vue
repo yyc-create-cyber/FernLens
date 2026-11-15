@@ -7,6 +7,7 @@
 import { computed, ref, watch } from 'vue'
 import { NAutoComplete, NButton, NInput, NModal, NSlider } from 'naive-ui'
 import { useEditor, saveAiConfig, saveAiIntent, refreshLocalAI } from '@/stores/editor'
+import { t, tx } from '@/lib/i18n'
 import {
   testAiEndpoint, downloadLocalModels, localModelsProgress,
   aiEndpointComplete, emptyAiConfig, AI_STRENGTH_MIN, AI_STRENGTH_MAX,
@@ -121,26 +122,28 @@ function onSave(): void {
   saveAiConfig(draft.value)
   saveAiIntent(intentDraft.value)
   store.aiSettingsOpen = false
-  store.status = complete.value || imageComplete.value ? 'AI 设置已保存' : 'AI 设置已清空'
+  store.status = complete.value || imageComplete.value
+    ? tx('AI 设置已保存', 'AI settings saved')
+    : tx('AI 设置已清空', 'AI settings cleared')
 }
 </script>
 
 <template>
   <NModal :show="store.aiSettingsOpen" @update:show="(v: boolean) => store.aiSettingsOpen = v">
     <div class="ai-settings">
-      <h3>AI 设置</h3>
+      <h3>{{ t('aiSet.title') }}</h3>
       <p class="desc">
-        两套 OpenAI 兼容端点，可以指向不同厂商：<b>对话模型</b>用于讨论(1)、参数(2)与一键精修；
-        <b>图生图模型</b>只用于生图(3)。配置仅保存在本机，图像会上传到对应端点。
-        <b>蒙版识别不走云端</b>，只用下面的本地引擎。
-        也可用环境变量 PHOTOLAB_AI_BASE_URL / PHOTOLAB_AI_KEY / PHOTOLAB_AI_MODEL 作为对话模型的后备。
+        {{ tx(
+          '两套 OpenAI 兼容端点，可以指向不同厂商：对话模型用于讨论、参数与一键精修；图生图模型只用于生图。AI 蒙版与景深模型完全在本地 HuggingFace ONNX 引擎运行，无需云端 API。',
+          'Configure two independent OpenAI-compatible endpoints (LLM for chat & AI grading, Image for /images/edits). Local segmentation & depth models run offline via HuggingFace ONNX.'
+        ) }}
       </p>
 
       <!-- 对话模型（1、2 号功能） -->
       <div class="ep-block">
         <div class="ep-head">
-          <span class="ep-title">对话模型 <i>讨论 / 参数 / 精修</i></span>
-          <span class="ep-state" :class="{ ok: complete }">{{ complete ? '已配置' : '未配置' }}</span>
+          <span class="ep-title">{{ tx('对话模型', 'Chat / Grading LLM') }} <i>{{ tx('讨论 / 参数 / 精修', 'Chat / Params / Auto') }}</i></span>
+          <span class="ep-state" :class="{ ok: complete }">{{ complete ? tx('已配置', 'Ready') : tx('未配置', 'Not set') }}</span>
         </div>
         <label class="field">
           <span class="f-label">URL</span>
@@ -154,13 +157,13 @@ function onSave(): void {
                   placeholder="sk-…" size="small" />
         </label>
         <label class="field">
-          <span class="f-label">模型 ID</span>
+          <span class="f-label">{{ tx('模型 ID', 'Model ID') }}</span>
           <NAutoComplete v-model:value="draft.llm.model" :options="modelOptions('llm')"
-                         placeholder="例如 gpt-4o / qwen-vl-max（可测试后从列表选择）"
+                         placeholder="gpt-4o / qwen-vl-max"
                          size="small" blur-input-on-select clearable />
         </label>
         <div class="ep-foot">
-          <NButton size="tiny" :loading="testing.llm" @click="onTest('llm')">测试连接</NButton>
+          <NButton size="tiny" :loading="testing.llm" @click="onTest('llm')">{{ tx('测试连接', 'Test') }}</NButton>
           <span class="test-msg" :class="{ ok: testOk.llm === true, bad: testOk.llm === false }">
             {{ testMessage.llm }}
           </span>
@@ -170,8 +173,8 @@ function onSave(): void {
       <!-- 图生图模型（3 号功能） -->
       <div class="ep-block">
         <div class="ep-head">
-          <span class="ep-title">图生图模型 <i>生图</i></span>
-          <span class="ep-state" :class="{ ok: imageComplete }">{{ imageComplete ? '已配置' : '未配置' }}</span>
+          <span class="ep-title">{{ tx('图生图模型', 'Image Edit API') }} <i>{{ tx('生图', 'Gen') }}</i></span>
+          <span class="ep-state" :class="{ ok: imageComplete }">{{ imageComplete ? tx('已配置', 'Ready') : tx('未配置', 'Not set') }}</span>
         </div>
         <label class="field">
           <span class="f-label">URL</span>
@@ -185,61 +188,57 @@ function onSave(): void {
                   placeholder="sk-…" size="small" />
         </label>
         <label class="field">
-          <span class="f-label">模型 ID</span>
+          <span class="f-label">{{ tx('模型 ID', 'Model ID') }}</span>
           <NAutoComplete v-model:value="draft.image.model" :options="modelOptions('image')"
-                         placeholder="例如 gpt-image-1 / flux-kontext / seedream"
+                         placeholder="gpt-image-1 / flux-kontext"
                          size="small" blur-input-on-select clearable />
         </label>
         <div class="ep-foot">
-          <NButton size="tiny" :loading="testing.image" @click="onTest('image')">测试连接</NButton>
+          <NButton size="tiny" :loading="testing.image" @click="onTest('image')">{{ tx('测试连接', 'Test') }}</NButton>
           <span class="test-msg" :class="{ ok: testOk.image === true, bad: testOk.image === false }">
             {{ testMessage.image }}
           </span>
         </div>
-        <p class="intent-hint">按 OpenAI 兼容 /images/edits 调用（原图 + 提示词 → 新图）。</p>
+        <p class="intent-hint">{{ tx('按 OpenAI 兼容 /images/edits 调用（原图 + 提示词 → 新图）。', 'Uses OpenAI-compatible /images/edits endpoint.') }}</p>
       </div>
 
       <label class="field intent-field">
-        <span class="f-label">精修要求</span>
+        <span class="f-label">{{ tx('精修要求', 'Prompt') }}</span>
         <NInput v-model:value="intentDraft" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }"
-                placeholder="可选，例如：调成暖调黄昏电影感 / 日系胶片、低饱和高光柔 / 高反差黑白"
+                :placeholder="tx('可选，例如：暖调黄昏电影感 / 日系通透胶片 / 高反差黑白', 'Optional style prompt for AI Grade')"
                 size="small" maxlength="600" show-count />
       </label>
-      <p class="intent-hint">
-        每次点「AI」都会按此要求做精修；留空则由模型自行判断风格。
-      </p>
 
       <label class="field strength-field">
         <span class="f-label">
-          AI 调整强度
+          {{ tx('AI 强度', 'Strength') }}
           <b class="strength-val">{{ Math.round(draft.strength * 100) }}%</b>
         </span>
         <NSlider v-model:value="draft.strength" :min="AI_STRENGTH_MIN" :max="AI_STRENGTH_MAX"
                  :step="0.05" :tooltip="false" />
       </label>
-      <p class="intent-hint">
-        统一缩放 AI 返回的幅度（参数 / 曲线 / 色轮 / 取色器）。默认 60% 偏克制；
-        觉得 AI 调得太猛就往下调，想要更强风格化再往上调。
-      </p>
 
       <!-- 本地像素级引擎 -->
       <div class="local-engine">
-        <div class="le-title">本地像素级引擎 <span v-if="localReady" class="le-ok">已就绪 · AI 蒙版默认使用</span></div>
-        <p class="le-desc">SAM 2 + U²-Net 本地推理：像素级掩码、免费、图像不出本机（CPU 约 2~10 秒/次）。</p>
+        <div class="le-title">
+          {{ t('aiSet.tabLocal') }}
+          <span v-if="localReady" class="le-ok">{{ tx('已就绪 · 默认本地运行', 'Ready · Offline Local') }}</span>
+        </div>
+        <p class="le-desc">{{ t('aiSet.localDesc') }}</p>
         <template v-if="local">
           <div v-for="(st, key) in local.models" :key="key" class="le-model">
             <span :class="st.ready ? 'le-dot ok' : 'le-dot'" />
             <span class="le-name">{{ st.file }}</span>
-            <span class="le-size">{{ (st.size / 1024 / 1024).toFixed(0) }} MB</span>
+            <span class="le-size">{{ (st.size / 1024 / 1024).toFixed(1) }} MB</span>
           </div>
         </template>
         <p v-if="local && !local.runtime" class="le-warn">
-          未安装 onnxruntime：pip install onnxruntime
+          onnxruntime not installed: pip install onnxruntime
         </p>
         <div class="le-actions">
           <NButton size="small" :loading="downloading" :disabled="localReady || !local?.runtime"
                    @click="onDownload">
-            {{ localReady ? '模型已就绪' : '下载模型（约 575 MB，hf-mirror）' }}
+            {{ localReady ? tx('全部模型已就绪', 'All Models Ready') : t('aiSet.downloadAll') }}
           </NButton>
         </div>
         <div v-if="downloading" class="le-progress">
@@ -247,13 +246,13 @@ function onSave(): void {
           <span class="pct">{{ dlPercent }}%</span>
           <span class="cur">{{ dlCurrent }}</span>
         </div>
-        <p v-if="dlError" class="le-warn">下载失败：{{ dlError }}</p>
+        <p v-if="dlError" class="le-warn">{{ dlError }}</p>
       </div>
 
       <div class="btns">
         <span class="spacer" />
-        <NButton size="small" @click="store.aiSettingsOpen = false">取消</NButton>
-        <NButton size="small" type="primary" :disabled="!complete" @click="onSave">保存</NButton>
+        <NButton size="small" @click="store.aiSettingsOpen = false">{{ tx('取消', 'Cancel') }}</NButton>
+        <NButton size="small" type="primary" :disabled="!complete" @click="onSave">{{ tx('保存', 'Save') }}</NButton>
       </div>
     </div>
   </NModal>
@@ -264,10 +263,12 @@ function onSave(): void {
   width: min(500px, 92vw);
   max-height: 88vh;
   overflow-y: auto;
-  background: var(--panel-2);
+  background: var(--glass-modal);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-radius: var(--r-3);
   padding: 18px 20px 16px;
-  box-shadow: 0 0 0 1px var(--line-2), 0 24px 60px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 0 0 1px var(--line-2), 0 24px 60px rgba(0, 0, 0, 0.35);
 }
 h3 {
   margin: 0 0 8px;
@@ -294,7 +295,7 @@ h3 {
   border-radius: var(--r-2);
   padding: 11px 12px 8px;
   margin-bottom: 10px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-1);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .ep-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 9px; }
@@ -309,7 +310,7 @@ h3 {
   border-radius: var(--r-2);
   padding: 10px 12px;
   margin-bottom: 12px;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--surface-1);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .le-title { font-size: 11.5px; color: var(--text-2); margin-bottom: 5px; }
@@ -327,7 +328,7 @@ h3 {
   flex: 1;
   height: 4px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.09);
+  background: var(--track);
   overflow: hidden;
 }
 .le-progress .fill {

@@ -7,6 +7,7 @@ import { computed, nextTick, ref } from 'vue'
 import Icon from '@/components/Icon'
 import { BUILTIN_FILTERS, filterSwatch } from '@/lib/filters'
 import type { FilterPreset } from '@/lib/filters'
+import { t, tx } from '@/lib/i18n'
 import {
   useEditor, applyFilter, saveCurrentAsFilter, deleteCustomFilter,
   exportFilters, importFiltersFromFile,
@@ -61,15 +62,15 @@ async function onFileChosen(e: Event): Promise<void> {
 <template>
   <div class="filter-panel">
     <div class="fp-tools">
-      <button class="btn outline fp-tool" title="把当前全局参数保存为新滤镜" @click="beginSave">
-        <Icon name="plus" :size="12" /> 保存当前
+      <button class="btn outline fp-tool" :title="t('filters.saveCurrent')" @click="beginSave">
+        <Icon name="plus" :size="12" /> {{ tx('保存当前', 'Save Current') }}
       </button>
-      <button class="btn outline fp-tool" :disabled="!custom.length" title="导出全部自定义滤镜为 JSON"
+      <button class="btn outline fp-tool" :disabled="!custom.length" :title="tx('导出全部自定义滤镜为 JSON', 'Export presets as JSON')"
               @click="exportFilters()">
-        <Icon name="download" :size="12" /> 导出
+        <Icon name="download" :size="12" /> {{ tx('导出', 'Export') }}
       </button>
-      <button class="btn outline fp-tool" title="从 JSON 文件导入滤镜" @click="fileInput?.click()">
-        <Icon name="upload" :size="12" /> 导入
+      <button class="btn outline fp-tool" :title="tx('从 JSON 文件导入滤镜', 'Import JSON preset')" @click="fileInput?.click()">
+        <Icon name="upload" :size="12" /> {{ tx('导入', 'Import') }}
       </button>
       <input ref="fileInput" type="file" accept="application/json,.json" hidden @change="onFileChosen" />
     </div>
@@ -80,30 +81,25 @@ async function onFileChosen(e: Event): Promise<void> {
         v-model="nameValue"
         class="pl-input"
         maxlength="40"
-        placeholder="滤镜名称"
+        :placeholder="t('filters.saveName')"
         @keydown.enter.prevent="confirmSave"
         @keydown.esc.prevent="cancelSave"
       />
-      <button class="mini" @click="confirmSave">保存</button>
-      <button class="mini" @click="cancelSave">取消</button>
+      <button class="mini" @click="confirmSave">{{ tx('保存', 'Save') }}</button>
+      <button class="mini" @click="cancelSave">{{ tx('取消', 'Cancel') }}</button>
     </div>
 
     <div class="fp-note">
-      <div class="fp-note-head"><span class="fp-dot" />滤镜只包含基础内容</div>
+      <div class="fp-note-head"><span class="fp-dot" />{{ tx('滤镜只包含全局影调与色轮', 'Global look presets') }}</div>
       <p>
-        只有全局影调（曝光 / 对比 / 高光 / 阴影 / 白平衡 / 饱和度等）、效果（清晰度 / 降噪 / 锐度 / 去朦胧）、
-        曲线与分级色轮。
-      </p>
-      <p>
-        <strong>一次只套用一个</strong>：点另一个滤镜会先复位再套用，不会和上一个叠加；
-        想叠加请直接手动调参数。
-      </p>
-      <p class="fp-note-warn">
-        不含蒙版（含 AI 识别蒙版）、取色点、仿制图章、裁剪/旋转，也不含局部调整与历史记录。
+        {{ tx(
+          '包含全局影调、质感、曲线与分级色轮。点选预设会先复位再套用，不会与上一个预设叠加。',
+          'Applies global tone, clarity, curves and 3-way color grading cleanly without stacking masks or crops.'
+        ) }}
       </p>
     </div>
 
-    <div class="sec-title">基础滤镜</div>
+    <div class="sec-title">{{ t('filters.builtin') }}</div>
     <div class="fgrid">
       <button
         v-for="p in BUILTIN_FILTERS"
@@ -119,10 +115,10 @@ async function onFileChosen(e: Event): Promise<void> {
     </div>
 
     <div class="sec-title">
-      我的滤镜 <span class="sec-count">{{ custom.length }}</span>
+      {{ t('filters.custom') }} <span class="sec-count">{{ custom.length }}</span>
     </div>
     <div v-if="!custom.length" class="empty">
-      调好一张照片后点「保存当前」，就能把自己的参数变成滤镜，随时复用或导出成 JSON。
+      {{ t('filters.emptyCustom') }}
     </div>
     <div
       v-for="p in custom"
@@ -154,8 +150,8 @@ async function onFileChosen(e: Event): Promise<void> {
   margin: 10px 0 2px;
   padding: 8px 9px 9px;
   border-radius: var(--r-2);
-  background: rgba(224, 161, 99, 0.07);
-  box-shadow: inset 0 0 0 1px rgba(224, 161, 99, 0.16);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
 }
 .fp-note-head {
   display: flex;
@@ -228,7 +224,7 @@ async function onFileChosen(e: Event): Promise<void> {
 .sec-count {
   padding: 0 5px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--surface-2);
   color: var(--text-3);
   font-size: 10px;
   letter-spacing: 0;
@@ -246,13 +242,13 @@ async function onFileChosen(e: Event): Promise<void> {
   padding: 5px;
   border: 0;
   border-radius: var(--r-2);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-1);
   color: var(--text-2);
   cursor: pointer;
   transition: background 0.14s var(--ease), color 0.14s var(--ease);
   box-shadow: inset 0 0 0 1px transparent;
 }
-.fcard:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); }
+.fcard:hover { background: var(--surface-hover); color: var(--text); }
 .fcard.on {
   background: var(--accent-soft);
   color: var(--accent-text);
@@ -263,7 +259,7 @@ async function onFileChosen(e: Event): Promise<void> {
   width: 100%;
   aspect-ratio: 16 / 10;
   border-radius: 6px;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+  box-shadow: inset 0 0 0 1px var(--line-2);
 }
 .fthumb.sm {
   flex: none;
@@ -289,7 +285,7 @@ async function onFileChosen(e: Event): Promise<void> {
   cursor: pointer;
   transition: background 0.14s var(--ease);
 }
-.frow:hover { background: rgba(255, 255, 255, 0.05); }
+.frow:hover { background: var(--surface-hover); }
 .frow.on { background: var(--accent-soft); }
 .frow .fname { text-align: left; }
 .grow { flex: 1; }

@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PhotoLab 服务端 sidecar 打包规格（PyInstaller onedir）
+# FernLens 服务端 sidecar 打包规格（PyInstaller onedir）
 #
-#   pyinstaller build/photolab-server.spec --noconfirm --distpath backend-dist
+#   pyinstaller build/fernlens-server.spec --noconfirm --distpath backend-dist
 #
-# 产物：backend-dist/photolab-server/（内含 photolab-server.exe + _internal/）
+# 产物：backend-dist/fernlens-server/（内含 fernlens-server.exe + _internal/）
 # 随后由 desktop/package.json 的 extraResources 整体复制为安装包里的 backend/ 目录。
 #
 # 关键内置资源：
@@ -13,6 +13,7 @@
 #                     若未内置，segment 会退化为 exe 同级 models/ 目录并从 hf-mirror 按需下载。
 
 import os
+import sys
 
 SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
 
@@ -65,6 +66,22 @@ a = Analysis(
     noarchive=False,
 )
 
+# Windows：防止旧版 wheel 附带的过时 MSVC 运行库（如 msvcp140.dll 14.26）覆盖系统新版，
+# 导致 onnxruntime 等 C++20 编译产物在初始化 std::mutex 时直接 0xC0000005 崩溃。
+if sys.platform == 'win32':
+    _sys32 = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
+    _vc_targets = {'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+                   'vcruntime140.dll', 'vcruntime140_1.dll'}
+    _fixed_binaries = []
+    for _dest, _src, _kind in a.binaries:
+        _base = os.path.basename(_dest).lower()
+        if os.path.dirname(_dest) in ('', '.') and _base in _vc_targets:
+            _sys_dll = os.path.join(_sys32, _base)
+            if os.path.isfile(_sys_dll):
+                _src = _sys_dll
+        _fixed_binaries.append((_dest, _src, _kind))
+    a.binaries = _fixed_binaries
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -72,7 +89,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='photolab-server',
+    name='fernlens-server',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -86,5 +103,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name='photolab-server',
+    name='fernlens-server',
 )

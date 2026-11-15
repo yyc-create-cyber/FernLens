@@ -1,4 +1,4 @@
-"""PhotoLab UI：调整面板与主窗口。
+"""FernLens UI：调整面板与主窗口。
 
 内容分区：
   1. 基础面板    2. 曲线面板   3. 颜色分级面板   4. 取色器面板
@@ -1127,7 +1127,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PhotoLab — 照片调色")
+        self.setWindowTitle("FernLens — 照片调色")
         self.resize(1460, 920)
         self.setAcceptDrops(True)
 
@@ -1494,8 +1494,8 @@ class MainWindow(QMainWindow):
                 if not auto.resolve_candidates():
                     self.aiError.emit(
                         "未配置 AI 模型。\n\n"
-                        "请设置环境变量 PHOTOLAB_AI_BASE_URL / PHOTOLAB_AI_KEY / "
-                        "PHOTOLAB_AI_MODEL\n（OpenAI 兼容接口 + 视觉模型）。")
+                        "请设置环境变量 FERNLENS_AI_BASE_URL / FERNLENS_AI_KEY / "
+                        "FERNLENS_AI_MODEL\n（OpenAI 兼容接口 + 视觉模型）。")
                     return
                 params, note, desc = auto.suggest_ai(src)
             except Exception as exc:

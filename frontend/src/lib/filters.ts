@@ -29,7 +29,7 @@ export interface FilterPreset {
 }
 
 /** 导出文件格式标识（导入时据此判断，也兼容裸 look / 数组 / {filters:[]}）。 */
-export const FILTER_FORMAT = 'photolab-filter'
+export const FILTER_FORMAT = 'fernlens-filter'
 export const FILTER_VERSION = 1
 
 // ------------------------------------------------------------ 数值域
@@ -408,10 +408,10 @@ export function parseFilterFile(text: string, fallbackName = '导入的滤镜'):
   return out
 }
 
-/** 导出文件名：photolab-filter-<名字>.json（去掉路径非法字符）。 */
+/** 导出文件名：fernlens-filter-<名字>.json（去掉路径非法字符）。 */
 export function filterFileName(name: string): string {
   const safe = name.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || 'filter'
-  return `photolab-filter-${safe}.json`
+  return `fernlens-filter-${safe}.json`
 }
 
 /** 下载 JSON（浏览器模式 / Electron 渲染进程都可用）。 */

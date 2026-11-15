@@ -2,12 +2,12 @@
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 rem ==================================================================
-rem  PhotoLab 本地运行（Web UI，开发即用）
+rem  FernLens 本地运行（Web UI，开发即用）
 rem  用法：双击运行，或在仓库根目录执行  run.bat
 rem        也可带参数透传给 server.py，例如：run.bat --port 8000
 rem
 rem  首次运行自动创建虚拟环境、安装依赖、构建前端，然后启动服务端；
-rem  就绪后控制台会打印： PHOTOLAB_SERVER_READY http://127.0.0.1:<port>
+rem  就绪后控制台会打印： FERNLENS_SERVER_READY http://127.0.0.1:<port>
 rem  默认 --no-auth，浏览器打开上面的地址即可。
 rem ==================================================================
 
@@ -91,7 +91,7 @@ if not exist frontend\dist\index.html (
 :serve
 echo.
 echo ==========================================================
-echo   PhotoLab 服务端启动中... 浏览器打开下面打印的地址
+echo   FernLens 服务端启动中... 浏览器打开下面打印的地址
 echo ==========================================================
 "%VENV_PY%" server.py --no-auth %*
 if errorlevel 1 (

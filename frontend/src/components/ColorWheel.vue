@@ -3,6 +3,7 @@
  *  对照旧 ui_widgets.ColorWheel + GradingPanel 的正负语义：
  *  负饱和度显示为 hue+180、|sat|；拖轮写回正饱和度与显示角。 */
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { getCanvasPalette, themeId } from '@/lib/theme'
 
 const props = withDefaults(defineProps<{
   hue: number              // WheelState.hue（度）
@@ -57,12 +58,13 @@ function draw(): void {
   }
 
   // 内盘
+  const pal = getCanvasPalette(themeId.value)
   ctx.beginPath()
   ctx.arc(c, c, DISC_R, 0, Math.PI * 2)
-  ctx.fillStyle = '#171a20'
+  ctx.fillStyle = pal.wheelBg
   ctx.fill()
   ctx.lineWidth = 1
-  ctx.strokeStyle = 'rgba(255,255,255,0.10)'
+  ctx.strokeStyle = pal.wheelBorder
   ctx.stroke()
 
   // 拖动点（y 向上：屏幕 y 取 -sin）
@@ -77,7 +79,7 @@ function draw(): void {
   ctx.fillStyle = `rgb(${sr},${sg},${sb})`
   ctx.fill()
   ctx.lineWidth = 1.5
-  ctx.strokeStyle = '#f1f2f5'
+  ctx.strokeStyle = pal.text
   ctx.stroke()
 }
 
@@ -119,7 +121,7 @@ function onPointerUp(e: PointerEvent): void {
 
 onMounted(draw)
 onBeforeUnmount(() => { dragging = false })
-watch(() => [props.hue, props.saturation], () => draw())
+watch(() => [props.hue, props.saturation, themeId.value], () => draw())
 </script>
 
 <template>

@@ -1,4 +1,4 @@
-"""PhotoLab 核心：纯 NumPy / OpenCV 图像处理。
+"""FernLens 核心：纯 NumPy / OpenCV 图像处理。
 
 本模块不依赖 Qt，输入输出都是 np.ndarray（float32 线性光，HxWx3）。
 内容分区（卷标注释可快速定位）：
@@ -248,13 +248,13 @@ class MaskAdjustments:
 
 @dataclass
 class MaskState:
-    """一个局部蒙版：linear(线性渐变) / radial(径向渐变) / brush(画笔) / ai(AI 识别)。
+    """一个局部蒙版：linear(线性渐变) / radial(径向渐变) / brush(画笔) / polygon(自定义多边形) / ai(AI 识别)。
 
     几何坐标全部归一化到 0..1（相对图像宽高），便于缩放与传输；
     feather / size 为 0..100 的 UI 档位，渲染时换算成像素。
     """
 
-    kind: str = "linear"                 # 'linear' | 'radial' | 'brush' | 'ai'
+    kind: str = "linear"                 # 'linear' | 'radial' | 'brush' | 'polygon' | 'ai'
     name: str = ""
     enabled: bool = True
     invert: bool = False                 # 反向：作用于蒙版之外
@@ -277,6 +277,9 @@ class MaskState:
     size: float = 12.0                   # 1..100
     strokes: list = field(default_factory=list)
 
+    # 自定义多边形：顶点列表 [(x, y), ...] 归一化坐标 0..1
+    points: list = field(default_factory=list)
+
     # AI 蒙版：识别目标（subject/person/background/sky）+ 掩码数据（两种形态）。
     # ① grid：'0'/'1' 字符行 + 尺寸（视觉大模型网格分割，粗边界）
     # ② mask_png：单通道 8bit PNG 的 base64（本地分割模型，像素级软边界）
@@ -292,7 +295,11 @@ class MaskState:
     adj: MaskAdjustments = field(default_factory=MaskAdjustments)
 
     def is_trivial(self) -> bool:
-        return (not self.enabled) or self.adj.is_default()
+        if (not self.enabled) or self.adj.is_default():
+            return True
+        if self.kind == "polygon" and len(self.points) < 3:
+            return True
+        return False
 
 
 @dataclass
@@ -1400,6 +1407,23 @@ def _radial_mask(m: "MaskState", shape) -> np.ndarray:
     return np.float32(1.0) - smoothstep(np.float32(1.0 - f), np.float32(1.0), d)
 
 
+def _feather_canvas_mask(canvas: np.ndarray, feather: float) -> np.ndarray:
+    """对二值/抗锯齿画布蒙版应用可分离高斯羽化（大图先降采样再上采样）。"""
+    h, w = canvas.shape[:2]
+    short = max(min(w, h), 1)
+    fpx = min(float(feather) / 100.0 * short * 0.15, 160.0)
+    if fpx > 0.6 and canvas.max() > 0:
+        s = 8 if min(h, w) >= 160 else 1
+        if s > 1:
+            sh, sw = max(1, h // s), max(1, w // s)
+            small = cv2.resize(canvas, (sw, sh), interpolation=cv2.INTER_AREA)
+            small = cv2.GaussianBlur(small, (0, 0), sigmaX=max(fpx / s, 0.5))
+            canvas = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            canvas = cv2.GaussianBlur(canvas, (0, 0), sigmaX=max(fpx, 0.5))
+    return np.clip(canvas, 0.0, 1.0)
+
+
 def _brush_mask(m: "MaskState", shape) -> np.ndarray:
     """画笔蒙版：硬边笔画 + 可分离高斯羽化（先 1/8 降采样模糊再上采样，限制邻域半径）。"""
     h, w = shape
@@ -1418,14 +1442,20 @@ def _brush_mask(m: "MaskState", shape) -> np.ndarray:
         ip = np.round(pts).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(canvas, [ip], False, 1.0, thickness=thick, lineType=cv2.LINE_8)
 
-    fpx = min(m.feather / 100.0 * short * 0.15, 160.0)
-    if fpx > 0.6 and canvas.max() > 0:
-        s = 8
-        sh, sw = max(1, h // s), max(1, w // s)
-        small = cv2.resize(canvas, (sw, sh), interpolation=cv2.INTER_AREA)
-        small = cv2.GaussianBlur(small, (0, 0), sigmaX=max(fpx / s, 0.5))
-        canvas = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
-    return np.clip(canvas, 0.0, 1.0)
+    return _feather_canvas_mask(canvas, m.feather)
+
+
+def _polygon_mask(m: "MaskState", shape) -> np.ndarray:
+    """自定义多边形蒙版：按归一化顶点填充多边形 + 高斯羽化。"""
+    h, w = shape
+    if not m.points or len(m.points) < 3:
+        return np.zeros((h, w), np.float32)
+    pts = np.asarray(m.points, np.float32) * np.array([w, h], np.float32)
+    ip = np.round(pts).astype(np.int32).reshape(-1, 1, 2)
+    u8 = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(u8, [ip], 255, lineType=cv2.LINE_AA)
+    canvas = u8.astype(np.float32) / np.float32(255.0)
+    return _feather_canvas_mask(canvas, m.feather)
 
 
 def grid_to_array(rows, gw: int, gh: int) -> np.ndarray:
@@ -1521,6 +1551,8 @@ def render_mask(m: "MaskState", shape, max_edge: int | None = None) -> np.ndarra
         mask = _linear_mask(m, shape)
     elif m.kind == "radial":
         mask = _radial_mask(m, shape)
+    elif m.kind == "polygon":
+        mask = _polygon_mask(m, shape)
     elif m.kind == "ai":
         mask = _ai_mask(m, shape)
     else:
@@ -1598,6 +1630,9 @@ def mask_cache_key(m: "MaskState", shape) -> tuple:
         # 掩码内容决定渲染结果；ai_target 只是语义标签，不影响像素
         return base + (int(m.grid_w), int(m.grid_h), tuple(m.grid),
                        hash(m.mask_png) if m.mask_png else 0)
+    if m.kind == "polygon":
+        pts = tuple((round(float(x), 5), round(float(y), 5)) for x, y in (m.points or []))
+        return base + (pts,)
     strokes = tuple(tuple((round(x, 5), round(y, 5)) for x, y in s) for s in m.strokes)
     return base + (round(m.size, 4), strokes)
 
@@ -1760,6 +1795,207 @@ def norm_rect_px(rect_norm, h: int, w: int) -> tuple:
     """归一化矩形 (x0,y0,x1,y1) -> 像素矩形（按高 h、宽 w 换算）。"""
     return (rect_norm[0] * w, rect_norm[1] * h,
             rect_norm[2] * w, rect_norm[3] * h)
+
+
+def stamp_brush(img: np.ndarray, src_start, points, radius_norm: float,
+                feather: float = 0.35, opacity: float = 1.0) -> None:
+    """Photoshop 风格仿制图章画笔涂抹（原地修改）：
+
+    - src_start: (sx, sy) 归一化起点采样坐标
+    - points: [(x, y), ...] 归一化笔迹坐标序列，偏移量为 src_start - points[0]
+    - radius_norm: 笔刷半径（相对图像短边）
+    - feather: 边缘羽化比例 0..1（0=硬边带 1px 抗锯齿，1=从中心柔和衰减到边缘）
+    - opacity: 单笔不透明度 0..1
+    在笔迹外接框内用 distanceTransform 计算精确欧氏距离，一次采样混合避免重叠累加与自涂抹。
+    """
+    if not points or radius_norm <= 0.0 or opacity <= 0.0:
+        return
+    h, w = img.shape[:2]
+    if h < 2 or w < 2:
+        return
+    short = float(min(h, w))
+    r_px = max(1.5, float(radius_norm) * short)
+    op = float(np.clip(opacity, 0.0, 1.0))
+    fe = float(np.clip(feather, 0.0, 1.0))
+
+    pts_px = np.asarray([(float(p[0]) * w, float(p[1]) * h) for p in points], np.float32)
+    off_x = int(round(float(src_start[0]) * w - pts_px[0, 0]))
+    off_y = int(round(float(src_start[1]) * h - pts_px[0, 1]))
+
+    pad = int(np.ceil(r_px)) + 2
+    bx0 = max(0, int(np.floor(pts_px[:, 0].min())) - pad)
+    by0 = max(0, int(np.floor(pts_px[:, 1].min())) - pad)
+    bx1 = min(w, int(np.ceil(pts_px[:, 0].max())) + pad + 1)
+    by1 = min(h, int(np.ceil(pts_px[:, 1].max())) + pad + 1)
+    bw, bh = bx1 - bx0, by1 - by0
+    if bw <= 0 or bh <= 0:
+        return
+
+    centerline = np.full((bh, bw), 255, np.uint8)
+    local_pts = np.round(pts_px - np.array([bx0, by0], np.float32)).astype(np.int32)
+    if len(local_pts) == 1:
+        px, py = int(local_pts[0, 0]), int(local_pts[0, 1])
+        if 0 <= px < bw and 0 <= py < bh:
+            centerline[py, px] = 0
+        else:
+            # 点在局部框边界外时改用解析距离
+            yy, xx = np.mgrid[by0:by1, bx0:bx1]
+            dist = np.hypot(xx.astype(np.float32) - pts_px[0, 0],
+                            yy.astype(np.float32) - pts_px[0, 1])
+    else:
+        cv2.polylines(centerline, [local_pts.reshape(-1, 1, 2)], False, 0,
+                      thickness=1, lineType=cv2.LINE_8)
+
+    if len(local_pts) > 1 or (0 <= int(local_pts[0, 0]) < bw and 0 <= int(local_pts[0, 1]) < bh):
+        dist = cv2.distanceTransform(centerline, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+
+    inner = min(r_px * (1.0 - fe * 0.95), max(0.0, r_px - 1.2))
+    alpha = (np.float32(1.0) - smoothstep(np.float32(inner), np.float32(r_px), dist)) * np.float32(op)
+    if float(alpha.max()) <= 1e-4:
+        return
+
+    sy = np.clip(np.arange(by0, by1, dtype=np.int32) + off_y, 0, h - 1)
+    sx = np.clip(np.arange(bx0, bx1, dtype=np.int32) + off_x, 0, w - 1)
+    patch = img[np.ix_(sy, sx)].astype(np.float32)
+
+    dst = img[by0:by1, bx0:bx1]
+    blended = dst.astype(np.float32) * (np.float32(1.0) - alpha[..., None]) + patch * alpha[..., None]
+    dst[...] = np.clip(blended + np.float32(0.5), 0, 255).astype(np.uint8)
+
+
+# ======================================================================
+# 8b2. AI 景深散景（基于 Depth Anything V2 深度图的光学镜头虚化）
+# ======================================================================
+
+
+def apply_depth_of_field(
+    rgb8: np.ndarray,
+    depth01: np.ndarray,
+    focus: float = 0.75,
+    aperture: float = 45.0,
+    dof_range: float = 20.0,
+    bokeh_highlight: float = 25.0,
+) -> np.ndarray:
+    """基于深度图模拟真实光学大光圈景深虚化（线性光空间 + 预乘防渗边金字塔）。
+
+    - focus: 对焦平面深度 0..1（1=最近前景，0=最远背景）
+    - aperture: 虚化强度/光圈 0..100（0 为原图不变）
+    - dof_range: 清晰景深宽度 0..80
+    - bokeh_highlight: 焦外高光散景增强 0..100
+    """
+    ap = float(np.clip(aperture, 0.0, 100.0))
+    if ap <= 0.5:
+        return np.ascontiguousarray(rgb8)
+
+    h, w = rgb8.shape[:2]
+    if h < 4 or w < 4:
+        return np.ascontiguousarray(rgb8)
+
+    d = np.asarray(depth01, dtype=np.float32)
+    if d.shape[:2] != (h, w):
+        d = cv2.resize(d, (w, h), interpolation=cv2.INTER_LINEAR)
+    d = np.clip(d, 0.0, 1.0)
+
+    focus_c = np.float32(np.clip(focus, 0.0, 1.0))
+    half_zone = np.float32(np.clip(dof_range, 0.0, 80.0) / 200.0)
+    delta = np.abs(d - focus_c)
+    excess = np.maximum(np.float32(0.0), delta - half_zone)
+    denom = np.float32(max(0.10, 1.0 - float(half_zone)))
+    coc = np.clip(excess / denom, 0.0, 1.0)
+    coc = np.power(coc, np.float32(1.12)).astype(np.float32)
+    if float(coc.max()) <= 1e-4:
+        return np.ascontiguousarray(rgb8)
+
+    short = float(min(h, w))
+    max_sigma = max(0.8, min(56.0, (ap / 100.0) * 0.036 * short))
+
+    lin = rgb8_to_linear(rgb8)
+    hl_str = float(np.clip(bokeh_highlight, 0.0, 100.0)) / 100.0 * 1.8
+    if hl_str > 1e-4:
+        lum = luminance(lin)
+        hl = smoothstep(np.float32(0.55), np.float32(0.95), lum) * coc * np.float32(hl_str)
+        lin_src = lin * (np.float32(1.0) + hl[..., None])
+    else:
+        lin_src = lin
+
+    # 预乘焦外遮罩，防止锐利前景颜色渗透到焦外散景形成暗边光晕
+    oob = smoothstep(np.float32(0.015), np.float32(0.14), coc)
+    src4 = np.empty((h, w, 4), dtype=np.float32)
+    src4[..., :3] = lin_src * oob[..., None]
+    src4[..., 3] = oob
+
+    levels = 5
+    idx_f = coc * np.float32(levels)
+    out_lin = np.zeros_like(lin)
+
+    # k = 0: 清晰合焦平面
+    w0 = np.maximum(np.float32(0.0), np.float32(1.0) - idx_f)
+    if np.any(w0 > 1e-4):
+        out_lin += lin * w0[..., None]
+
+    for k in range(1, levels + 1):
+        wk = np.maximum(np.float32(0.0), np.float32(1.0) - np.abs(idx_f - np.float32(k)))
+        if not np.any(wk > 1e-4):
+            continue
+        sig = max_sigma * ((k / float(levels)) ** 1.35)
+        if k == 1:
+            # 焦平面边缘柔顺过渡：低半径不掩码，避免 0..0.15 coc 出现台阶
+            lk = cv2.GaussianBlur(lin_src, (0, 0), sigmaX=sig, sigmaY=sig,
+                                  borderType=cv2.BORDER_REPLICATE)
+        else:
+            if sig > 9.0 and h >= 64 and w >= 64:
+                dh, dw = max(16, h // 2), max(16, w // 2)
+                small = cv2.resize(src4, (dw, dh), interpolation=cv2.INTER_AREA)
+                b_small = cv2.GaussianBlur(small, (0, 0), sigmaX=sig * 0.5, sigmaY=sig * 0.5,
+                                           borderType=cv2.BORDER_REPLICATE)
+                b4 = cv2.resize(b_small, (w, h), interpolation=cv2.INTER_LINEAR)
+            else:
+                b4 = cv2.GaussianBlur(src4, (0, 0), sigmaX=sig, sigmaY=sig,
+                                      borderType=cv2.BORDER_REPLICATE)
+            alpha = b4[..., 3:4]
+            safe_a = np.maximum(alpha, np.float32(1e-3))
+            cover = np.clip(alpha * np.float32(10.0), 0.0, 1.0)
+            lk = cover * (b4[..., :3] / safe_a) + (np.float32(1.0) - cover) * lin
+        out_lin += lk * wk[..., None]
+
+    if hl_str > 1e-4:
+        # 高光柔和压缩肩部，保住散景光斑色彩与圆润感
+        over = np.maximum(np.float32(0.0), out_lin - np.float32(0.92))
+        out_lin = np.where(
+            out_lin > np.float32(0.92),
+            np.float32(0.92) + over / (np.float32(1.0) + over * np.float32(6.0)),
+            out_lin,
+        )
+    return linear_to_rgb8(np.clip(out_lin, 0.0, 1.0))
+
+
+def depth_focus_preview(depth01: np.ndarray, focus: float = 0.75,
+                        dof_range: float = 20.0, max_edge: int = 280) -> str:
+    """渲染紧凑深度图 + 绿色清晰焦平面高亮提示 PNG（base64）。"""
+    import base64
+
+    d = np.asarray(depth01, dtype=np.float32)
+    h, w = d.shape[:2]
+    scale = min(1.0, float(max_edge) / float(max(h, w, 1)))
+    if scale < 1.0:
+        nh = max(8, int(round(h * scale)))
+        nw = max(8, int(round(w * scale)))
+        d = cv2.resize(d, (nw, nh), interpolation=cv2.INTER_AREA)
+    d = np.clip(d, 0.0, 1.0)
+
+    u8 = np.clip(np.rint(d * 255.0), 0, 255).astype(np.uint8)
+    vis = cv2.applyColorMap(u8, cv2.COLORMAP_INFERNO).astype(np.float32)
+
+    half_zone = np.float32(np.clip(dof_range, 0.0, 80.0) / 200.0)
+    delta = np.abs(d - np.float32(np.clip(focus, 0.0, 1.0)))
+    in_focus = np.float32(1.0) - smoothstep(
+        half_zone, np.float32(float(half_zone) + 0.06), delta)
+    # 合焦带叠加青绿高亮，直观标识清晰范围
+    focus_bgr = np.array([175.0, 255.0, 95.0], dtype=np.float32)
+    blend = in_focus[..., None] * np.float32(0.55)
+    vis = vis * (np.float32(1.0) - blend) + focus_bgr * blend
+    ok, buf = cv2.imencode(".png", np.clip(vis, 0, 255).astype(np.uint8))
+    return base64.b64encode(buf.tobytes()).decode("ascii") if ok else ""
 
 
 # ======================================================================
@@ -1959,6 +2195,8 @@ def remap_mask_geometry(masks, map_point, old_shape, new_shape,
         elif m.kind == "ai":
             _remap_ai_grid(m, map_point, swap_dims=swap_grid_dims)
             _remap_ai_mask_png(m, map_point)
+        elif m.kind == "polygon":
+            m.points = [tuple(map_point(x, y)) for x, y in (m.points or [])]
         else:
             m.strokes = [[tuple(map_point(x, y)) for x, y in s]
                          for s in m.strokes]
@@ -2066,8 +2304,8 @@ _CV2_THREADS = max(1, (os.cpu_count() or 4) // 2)
 _EXECUTOR: ThreadPoolExecutor | None = None
 _EXECUTOR_LOCK = threading.Lock()
 
-# 环境变量 PHOTOLAB_NO_GPU=1 强制关闭 GPU 路径
-_GPU_ENABLED = os.environ.get("PHOTOLAB_NO_GPU", "") != "1"
+# 环境变量 FERNLENS_NO_GPU=1（兼容 PHOTOLAB_NO_GPU=1）强制关闭 GPU 路径
+_GPU_ENABLED = (os.environ.get("FERNLENS_NO_GPU") or os.environ.get("PHOTOLAB_NO_GPU", "")) != "1"
 
 # 进入并行渲染前记录 OpenCV 默认线程数，结束后恢复（setNumThreads 是进程级全局设置）
 _CV2_DEFAULT_THREADS = cv2.getNumThreads()
@@ -2081,7 +2319,7 @@ def _executor() -> ThreadPoolExecutor:
                 # 池子要能容纳「无效果的纯逐像素链」用的多块并行
                 _EXECUTOR = ThreadPoolExecutor(
                     max_workers=max(_MAX_WORKERS, min(8, os.cpu_count() or 2)),
-                                               thread_name_prefix="photolab")
+                                               thread_name_prefix="fernlens")
     return _EXECUTOR
 
 

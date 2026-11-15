@@ -1,6 +1,6 @@
 """server.py API 层自检。运行：python tests_server.py
 
-在 PHOTOLAB_SYNC=1 下运行（渲染在请求线程内同步完成，结果确定）。
+在 FERNLENS_SYNC=1 下运行（渲染在请求线程内同步完成，结果确定）。
 关键用例：同一参数下，API 保存的 PNG 与直接调用 core.process 的输出逐位一致。
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ import struct
 import tempfile
 import traceback
 
-os.environ["PHOTOLAB_SYNC"] = "1"      # 必须在 import server 之前设置
+os.environ["FERNLENS_SYNC"] = "1"      # 必须在 import server 之前设置
 
 import cv2
 import numpy as np
@@ -99,7 +99,7 @@ def test_meta_and_auth():
     r = _get("/api/meta")
     assert r.status_code == 200, r.text
     meta = r.json()
-    assert meta["app"] == "PhotoLab"
+    assert meta["app"] == "FernLens"
     assert isinstance(meta["rawpy"], bool)
     assert meta["hist_bins"] == core.HIST_BINS
 
@@ -561,7 +561,9 @@ def test_ai_mask_local_engine():
     assert r.status_code == 200, r.text
     st = r.json()
     assert isinstance(st["runtime"], bool)
-    assert set(st["models"]) == {"sam_encoder", "sam_decoder", "u2net", "skyseg", "yolov8n"}
+    assert set(st["models"]) == {
+        "sam_encoder", "sam_decoder", "u2net", "skyseg", "yolov8n", "depth_anything_v2",
+    }
 
     # 下载端点幂等启动（不真正等下载完成，只验证接线；用假目录避免碰真模型）
     orig_status = segment.models_status
@@ -630,16 +632,226 @@ def test_ai_mask_local_engine():
             server.segment.segment_local = orig_seg
 
 
+def test_stamp_brush_and_undo():
+    """Photoshop 风格画笔仿制图章：采样点 + 涂抹笔迹 + 渲染生效 + 撤销恢复。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        img = np.zeros((120, 200, 3), np.uint8)
+        img[:, :100] = (240, 20, 20)
+        img[:, 100:] = (20, 20, 240)
+        p = os.path.join(tmp, "brush_stamp.png")
+        cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1].tofile(p)
+        _post_json("/api/open", {"path": p})
+
+        r = _post_json("/api/stamp/brush", {
+            "src_start": [0.25, 0.5],
+            "points": [[0.75, 0.5], [0.82, 0.5]],
+            "radius": 0.12,
+            "feather": 0.0,
+            "opacity": 100.0,
+        })
+        assert r.status_code == 200, r.text
+        after = server.doc.retouch_full
+        assert after[60, 150, 0] > 200 and after[60, 150, 2] < 50
+
+        # 确认 /api/render 真正读取图章修改后的 active_full
+        rr = _post_json("/api/render", {"adjustments": {}, "format": "png"})
+        assert rr.status_code == 200
+        rendered = cv2.cvtColor(
+            cv2.imdecode(np.frombuffer(rr.content, np.uint8), cv2.IMREAD_COLOR),
+            cv2.COLOR_BGR2RGB)
+        assert rendered[60, 150, 0] > 200
+
+        r = _post_json("/api/stamp/undo", {})
+        assert r.status_code == 200
+        assert server.doc.retouch_full is None
+        assert tuple(server.doc.source[60, 150]) == (20, 20, 240)
+
+
+def test_depth_relight_real_model():
+    """使用 HuggingFace 下载的 Depth Anything V2 本地模型测试景深蒙版与立体调色。"""
+    assert segment.models_status()["depth_anything_v2"]["ready"], "depth_anything_v2 模型应已就绪"
+    with tempfile.TemporaryDirectory() as tmp:
+        img = _make_image(240, 320, seed=19)
+        cv2.circle(img, (160, 140), 55, (235, 190, 145), -1)
+        p = os.path.join(tmp, "depth_test.png")
+        cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1].tofile(p)
+        _post_json("/api/open", {"path": p})
+
+        r = _post_json("/api/ai/depth-relight", {
+            "preset": "studio",
+            "strength": 1.0,
+            "near_bias": 0.0,
+        })
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert len(data["masks"]) == 2
+        assert data["masks"][0]["ai_target"] == "depth_near"
+        assert data["masks"][1]["ai_target"] == "depth_far"
+        assert data["depth_preview_png"]
+        assert data["masks"][0]["adj"]["exposure"] > 0
+        assert data["masks"][1]["adj"]["exposure"] < 0
+
+        r2 = _post_json("/api/mask/ai", {"target": "depth_near", "engine": "local"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["mask_png"]
+
+
+def test_color_match():
+    """AI 参考仿色：支持上传参考图与图库参考图，返回可编辑参数与主色调色板。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _make_image(160, 220, seed=7)
+        ref = np.zeros((160, 220, 3), np.uint8)
+        ref[:80] = (230, 175, 110)   # 暖高光
+        ref[80:] = (45, 75, 95)      # 青阴影
+        ps = os.path.join(tmp, "src.png")
+        pr = os.path.join(tmp, "ref.png")
+        cv2.imencode(".png", cv2.cvtColor(src, cv2.COLOR_RGB2BGR))[1].tofile(ps)
+        cv2.imencode(".png", cv2.cvtColor(ref, cv2.COLOR_RGB2BGR))[1].tofile(pr)
+
+        r_ref = _post_json("/api/open", {"path": pr})
+        ref_id = r_ref.json()["id"]
+        _post_json("/api/open", {"path": ps})
+
+        # 图库参考匹配
+        r = client.post(_auth("/api/ai/color-match"),
+                        data={"ref_id": str(ref_id), "strength": "0.8", "protect_subject": "true"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["adjustments"] and len(body["ref_palette"]) == 5 and len(body["src_palette"]) == 5
+
+        # 文件上传参考匹配
+        with open(pr, "rb") as f:
+            r2 = client.post(_auth("/api/ai/color-match"),
+                             files={"file": ("ref.png", f, "image/png")},
+                             data={"strength": "0.75"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["adjustments"]
+
+
+def test_depth_of_field_real_model():
+    """使用 HuggingFace Depth Anything V2 本地模型测试 AI 调节景深（取点对焦 + 光学散景虚化 + 清除）。"""
+    assert segment.models_status()["depth_anything_v2"]["ready"], "depth_anything_v2 模型应已就绪"
+    with tempfile.TemporaryDirectory() as tmp:
+        img = _make_image(240, 320, seed=53)
+        # 添加网格高频纹理以便衡量虚化效果
+        img[::8, :] = np.clip(img[::8, :].astype(np.int32) + 45, 0, 255).astype(np.uint8)
+        cv2.circle(img, (160, 145), 54, (235, 195, 150), -1)
+        cv2.circle(img, (160, 145), 24, (80, 50, 40), 2)
+        p = os.path.join(tmp, "dof_test.png")
+        cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1].tofile(p)
+        _post_json("/api/open", {"path": p})
+
+        # 1. 画布点击取焦（选中中心主体）
+        rp = _post_json("/api/ai/dof/pick", {"x": 0.5, "y": 0.6, "dof_range": 12.0})
+        assert rp.status_code == 200, rp.text
+        pick_data = rp.json()
+        assert 0.0 <= pick_data["focus"] <= 1.0
+        assert pick_data["depth_preview_png"]
+
+        # 2. 应用大光圈景深虚化
+        r = _post_json("/api/ai/dof", {
+            "focus": pick_data["focus"],
+            "aperture": 85.0,
+            "dof_range": 10.0,
+            "bokeh_highlight": 40.0,
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["active"] is True
+        assert body["depth_preview_png"]
+
+        rr = _post_json("/api/render", {"adjustments": {}, "format": "png"})
+        assert rr.status_code == 200
+        blurred = cv2.cvtColor(
+            cv2.imdecode(np.frombuffer(rr.content, np.uint8), cv2.IMREAD_COLOR),
+            cv2.COLOR_BGR2RGB)
+        assert blurred.shape == img.shape
+        diff = np.abs(blurred.astype(np.float32) - img.astype(np.float32)).mean()
+        assert diff > 1.0, f"景深虚化应对焦外产生可观变化，实测 diff={diff}"
+
+        # 焦外像素清晰度（梯度能量）下降
+        depth_map = segment.estimate_depth(img)
+        far_mask = np.abs(depth_map - pick_data["focus"]) > 0.25
+        if np.any(far_mask):
+            g_orig = cv2.Laplacian(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), cv2.CV_32F)
+            g_blur = cv2.Laplacian(cv2.cvtColor(blurred, cv2.COLOR_RGB2GRAY), cv2.CV_32F)
+            assert np.abs(g_blur[far_mask]).mean() < np.abs(g_orig[far_mask]).mean() * 0.85
+
+        # 3. 清除景深恢复原图
+        rc = _post_json("/api/ai/dof/clear", {})
+        assert rc.status_code == 200 and rc.json()["active"] is False
+        assert np.array_equal(server.doc.active_full, img)
+
+
+def test_polygon_mask():
+    """自定义多边形蒙版：渲染、羽化、反向、序列化往返、旋转重映射与局部调色生效。"""
+    pts = [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)]
+    m_hard = core.MaskState(kind="polygon", points=pts, feather=0.0, invert=False)
+    m_soft = core.MaskState(kind="polygon", points=pts, feather=40.0, invert=False)
+    m_inv = core.MaskState(kind="polygon", points=pts, feather=0.0, invert=True)
+    m_empty = core.MaskState(kind="polygon", points=[(0.1, 0.1), (0.5, 0.5)], feather=0.0)
+    m_empty.adj.exposure = 2.0
+
+    r_hard = core.render_mask(m_hard, (100, 100))
+    assert r_hard[50, 50] > 0.99 and r_hard[5, 5] < 0.01
+
+    r_soft = core.render_mask(m_soft, (100, 100))
+    # 羽化后边界附近出现过渡灰度
+    assert 0.01 < r_soft[25, 50] < 0.99
+
+    r_inv = core.render_mask(m_inv, (100, 100))
+    assert r_inv[50, 50] < 0.01 and r_inv[5, 5] > 0.99
+
+    assert m_empty.is_trivial() is True
+    assert core.render_mask(m_empty, (64, 64)).max() == 0.0
+
+    # 旋转 90° 后顶点坐标同步
+    rot_m = core.MaskState(kind="polygon", points=[(0.2, 0.3), (0.8, 0.3), (0.5, 0.7)])
+    core.remap_masks_rot90([rot_m], 1, (100, 100))
+    assert abs(rot_m.points[0][0] - 0.3) < 1e-6 and abs(rot_m.points[0][1] - 0.8) < 1e-6
+
+    # 服务端序列化 + 局部调色渲染
+    with tempfile.TemporaryDirectory() as tmp:
+        img = np.full((120, 120, 3), 100, np.uint8)
+        p = os.path.join(tmp, "poly.png")
+        cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1].tofile(p)
+        _post_json("/api/open", {"path": p})
+
+        adj = {
+            "masks": [{
+                "kind": "polygon",
+                "name": "Polygon 1",
+                "enabled": True,
+                "invert": False,
+                "feather": 0,
+                "points": pts,
+                "adj": {"exposure": 1.5},
+            }],
+        }
+        parsed = server.adjustments_from_dict(adj)
+        assert parsed.masks[0].kind == "polygon" and len(parsed.masks[0].points) == 4
+        rr = _post_json("/api/render", {"adjustments": adj, "format": "png"})
+        assert rr.status_code == 200
+        out = cv2.cvtColor(
+            cv2.imdecode(np.frombuffer(rr.content, np.uint8), cv2.IMREAD_COLOR),
+            cv2.COLOR_BGR2RGB)
+        # 多边形中心提亮，多边形外保持原值
+        assert out[60, 60, 0] > 140
+        assert abs(int(out[5, 5, 0]) - 100) <= 2
+
+
 # ======================================================================
 CASES = [test_meta_and_auth, test_open_and_meta_width_height, test_open_bad_file,
          test_save_bitwise_parity_with_core, test_save_default_params_short_path,
          test_ws_render_frame, test_ws_bad_token_rejected,
          test_serialization_roundtrip, test_stamp_apply_and_undo,
-         test_crop_and_rotate, test_histogram, test_auto_rule, test_pick,
-         test_defaults, test_open_upload_and_render_download,
-         test_ai_endpoints_with_mock, test_ai_mask_requires_image,
-         test_ai_mask_save_parity, test_library_multi_image,
-         test_ai_mask_local_engine]
+         test_stamp_brush_and_undo, test_crop_and_rotate, test_histogram,
+         test_auto_rule, test_pick, test_defaults,
+         test_open_upload_and_render_download, test_ai_endpoints_with_mock,
+         test_ai_mask_requires_image, test_ai_mask_save_parity,
+         test_library_multi_image, test_ai_mask_local_engine,
+         test_depth_relight_real_model, test_color_match,
+         test_depth_of_field_real_model, test_polygon_mask]
 
 
 def main():

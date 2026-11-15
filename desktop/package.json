@@ -1,8 +1,8 @@
 {
-  "name": "photolab-desktop",
-  "productName": "PhotoLab",
+  "name": "fernlens-desktop",
+  "productName": "FernLens",
   "version": "1.0.0",
-  "description": "PhotoLab — 本地照片调色器（Electron 壳）",
+  "description": "FernLens — 本地照片调色器（Electron 壳）",
   "private": true,
   "main": "main.cjs",
   "scripts": {
@@ -22,13 +22,13 @@
     "electron-builder": "^25.1.8"
   },
   "build": {
-    "appId": "com.photolab.app",
-    "productName": "PhotoLab",
+    "appId": "com.fernlens.app",
+    "productName": "FernLens",
     "directories": { "output": "release" },
     "files": ["main.cjs", "preload.cjs", "afterpack.cjs", "package.json"],
     "afterPack": "afterpack.cjs",
     "extraResources": [
-      { "from": "../backend-dist/photolab-server", "to": "backend" }
+      { "from": "../backend-dist/fernlens-server", "to": "backend" }
     ],
     "win": {
       "icon": "../build/icon.ico",
@@ -42,7 +42,7 @@
       "icon": "../build/icon.png",
       "category": "public.app-category.photography",
       "target": ["dmg", "zip"],
-      "artifactName": "PhotoLab-${version}-${arch}.${ext}",
+      "artifactName": "FernLens-${version}-${arch}.${ext}",
       "darkModeSupport": true,
       "gatekeeperAssess": false,
       "hardenedRuntime": false,
@@ -52,8 +52,8 @@
       }
     },
     "dmg": {
-      "title": "PhotoLab ${version}",
-      "artifactName": "PhotoLab-Setup-${version}-${arch}.${ext}",
+      "title": "FernLens ${version}",
+      "artifactName": "FernLens-Setup-${version}-${arch}.${ext}",
       "contents": [
         { "x": 130, "y": 220, "type": "file" },
         { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
@@ -62,15 +62,15 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "PhotoLab-Setup-${version}.${ext}"
+      "artifactName": "FernLens-Setup-${version}.${ext}"
     },
     "portable": {
-      "artifactName": "PhotoLab-Portable-${version}.${ext}"
+      "artifactName": "FernLens-Portable-${version}.${ext}"
     },
     "publish": {
       "provider": "github",
       "owner": "nothing1145141",
-      "repo": "photolab"
+      "repo": "fernlens"
     }
   }
 }

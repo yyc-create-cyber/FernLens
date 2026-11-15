@@ -3,6 +3,7 @@
  *  暗底、极细网格、底部渐隐——安静地待在面板顶部，不抢视线。 */
 import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import type { HistData } from '@/api/client'
+import { getCanvasPalette, themeId } from '@/lib/theme'
 
 const props = defineProps<{ hist: HistData | null }>()
 const canvas = ref<HTMLCanvasElement | null>(null)
@@ -37,10 +38,11 @@ function redraw(): void {
   cv.height = Math.round(h * dpr)
   const ctx = cv.getContext('2d')!
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  const pal = getCanvasPalette(themeId.value)
   ctx.clearRect(0, 0, w, h)
 
   // 25/50/75% 竖向参考线
-  ctx.strokeStyle = 'rgba(255,255,255,0.045)'
+  ctx.strokeStyle = pal.gridLine
   ctx.lineWidth = 1
   for (const f of [0.25, 0.5, 0.75]) {
     ctx.beginPath()
@@ -51,14 +53,14 @@ function redraw(): void {
 
   const hist = props.hist
   if (!hist) return
-  ctx.globalCompositeOperation = 'screen'      // RGB 叠加处趋白，与主流直方图一致
-  ctx.fillStyle = 'rgba(140,146,158,0.42)'
+  ctx.globalCompositeOperation = themeId.value === 'dark' ? 'screen' : 'source-over'
+  ctx.fillStyle = themeId.value === 'dark' ? 'rgba(140,146,158,0.42)' : 'rgba(15,23,42,0.22)'
   drawPath(ctx, hist.master, w, h)
-  ctx.fillStyle = 'rgba(255,84,84,0.60)'
+  ctx.fillStyle = 'rgba(235,68,68,0.48)'
   drawPath(ctx, hist.red, w, h)
-  ctx.fillStyle = 'rgba(78,226,128,0.55)'
+  ctx.fillStyle = 'rgba(34,197,94,0.45)'
   drawPath(ctx, hist.green, w, h)
-  ctx.fillStyle = 'rgba(92,132,255,0.62)'
+  ctx.fillStyle = 'rgba(59,130,246,0.50)'
   drawPath(ctx, hist.blue, w, h)
   ctx.globalCompositeOperation = 'source-over'
 }
@@ -69,7 +71,7 @@ onMounted(() => {
   if (canvas.value) ro.observe(canvas.value)
 })
 onBeforeUnmount(() => ro?.disconnect())
-watch(() => props.hist, redraw, { deep: false })
+watch(() => [props.hist, themeId.value], redraw, { deep: false })
 </script>
 
 <template>

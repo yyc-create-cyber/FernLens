@@ -17,13 +17,14 @@ import {
   lookFromAdjustments, parseFilterFile, resetGlobalLook, sanitizeLook,
 } from '@/lib/filters'
 import type { FilterPreset } from '@/lib/filters'
+import { tx } from '@/lib/i18n'
 
 interface Frame { bmp: ImageBitmap; rid: number }
 
 /** AI 端点配置（localStorage 持久化；服务端也支持环境变量回退）。 */
-const AI_CONFIG_KEY = 'photolab.ai-config'
+const AI_CONFIG_KEY = 'fernlens.ai-config'
 /** 精修提示词（可选，随每次 AI 请求发送；localStorage 持久化）。 */
-const AI_INTENT_KEY = 'photolab.ai-intent'
+const AI_INTENT_KEY = 'fernlens.ai-intent'
 
 function loadAiIntent(): string {
   try {
@@ -67,7 +68,7 @@ function loadAiConfig(): AiConfig {
 }
 
 /** 自定义滤镜（localStorage 持久化；导入的 JSON 也存这里）。 */
-const FILTERS_KEY = 'photolab.filters'
+const FILTERS_KEY = 'fernlens.filters'
 
 function loadCustomFilters(): FilterPreset[] {
   try {
@@ -129,19 +130,36 @@ const state = reactive({
   aiConfig: loadAiConfig(),
   aiIntent: loadAiIntent(),
   aiSettingsOpen: false,
+  aiStudioOpen: false,
+  prefsOpen: false,
   aiChatOpen: false,
   aiBusy: null as AiMaskTarget | null,
-  // 本地像素级引擎（SAM2 + U2Net；就绪时 AI 蒙版默认走本地，图像不出本机）
+  // 本地像素级引擎（SAM2 + U2Net + Depth Anything V2）
   localAI: null as LocalModelsStatus | null,
+  // AI 调节景深（Depth Anything V2 光学虚化）
+  dofActive: false,
+  dofFocus: 0.75,
+  dofAperture: 45,
+  dofRange: 20,
+  dofBokeh: 25,
+  dofPicking: false,
+  dofFocusPt: null as [number, number] | null,
+  dofPreviewPng: '',
   // 取色模式：null=未激活 | 'new'=新建取色点 | number=重新取色第 i 个
   pickTarget: null as null | 'new' | number,
   pickSelected: null as number | null,
   // 编辑模式（对照旧 PreviewWidget.set_edit_mode / crop / stamp）
   editMode: null as null | 'crop' | 'stamp' | 'mask',
   maskSelected: null as number | null,
-  // 图章（服务端持有工作副本；前端记源矩形与羽化档位）
+  // 仿制图章（Photoshop 式画笔仿制 + 对齐/羽化/不透明度）
   stampSource: null as RectNorm | null,
-  stampFeather: 20,
+  stampSourcePt: null as [number, number] | null,
+  stampPickingSource: false,
+  stampSize: 22,            // 1..100 -> radiusNorm = stampSize * 0.0022
+  stampFeather: 35,         // 0..100
+  stampOpacity: 100,        // 5..100
+  stampAligned: true,       // 对齐取样（松笔后保持相对位移）
+  stampOffset: null as [number, number] | null,
   // 裁剪（归一化 rect + 拉直角度 + 比例锁定；应用时服务端权威计算）
   cropRect: null as { x0: number; y0: number; x1: number; y1: number } | null,
   cropAngle: 0,
@@ -152,10 +170,14 @@ const state = reactive({
   originalBmp: null as ImageBitmap | null,
   // 蒙版叠加显示（LR 的 O 键开关；仅影响叠加显示，不影响渲染）
   maskOverlay: true,
-  // 蒙版红色叠加只在「需要看蒙版」时出现：悬停蒙版条目（maskHover）
-  // 或新建/预览后的短暂显示（maskReveal），避免调参数时一直挡着画面
+  // 蒙版选中后始终显示半透明红色叠加；在针对蒙版做色彩/影调调整时自动隐藏以方便预览
+  maskAdjusting: false,
   maskHover: false,
   maskReveal: false,
+  // 右侧当前激活的面板 Tab（与 App.vue 同步）
+  activeTab: 'light' as 'light' | 'color' | 'effects' | 'filter' | 'curve' | 'grading' | 'mask' | 'picker' | 'history',
+  // 自定义多边形选点绘制状态
+  polyDrawing: false,
   // 历史记录（每图独立；存完整参数快照，可跳到任意一步）
   history: [] as { label: string; at: number }[],
   historyIndex: -1,
@@ -197,6 +219,23 @@ export function saveAiIntent(intent: string): void {
 export function openAiSettings(): void {
   state.aiSettingsOpen = true
   void refreshLocalAI()
+}
+
+export function openAiStudio(): void {
+  state.aiStudioOpen = true
+  void refreshLocalAI()
+}
+
+export function closeAiStudio(): void {
+  state.aiStudioOpen = false
+}
+
+export function openPrefs(): void {
+  state.prefsOpen = true
+}
+
+export function closePrefs(): void {
+  state.prefsOpen = false
 }
 
 /** 打开/关闭右下角 AI 对话框（对话 / 参数 / 生图）。 */
@@ -304,6 +343,10 @@ let idleTimer: ReturnType<typeof setTimeout> | null = null
 export function notifyChanged(): void {
   if (!state.loaded) return
   if (!filterApplying && state.maskSelected === null) state.activeFilter = ''
+  if (state.maskSelected !== null && state.activeTab !== 'mask') {
+    state.maskAdjusting = true
+    state.maskReveal = false
+  }
   if (previewTimer === null) {
     previewTimer = setTimeout(() => { previewTimer = null; sendPreview() }, 30)
   }
@@ -315,6 +358,10 @@ export function notifyChanged(): void {
 export function notifyCommitted(): void {
   if (!state.loaded) return
   if (!filterApplying && state.maskSelected === null) state.activeFilter = ''
+  if (state.maskSelected !== null && state.activeTab !== 'mask') {
+    state.maskAdjusting = true
+    state.maskReveal = false
+  }
   if (idleTimer !== null) { clearTimeout(idleTimer); idleTimer = null }
   sendFull()
 }
@@ -467,6 +514,8 @@ export function jumpToHistory(index: number): void {
       state.maskSelected = null
     }
     if (state.maskSelected === null && state.editMode === 'mask') state.editMode = null
+    state.polyDrawing = false
+    polyBackupPoints = null
     if (state.pickSelected !== null && state.pickSelected >= state.adjustments.pickers.length) {
       state.pickSelected = null
     }
@@ -529,12 +578,18 @@ function scheduleHistogram(): void {
 function _resetEditState(): void {
   state.editMode = null
   state.maskSelected = null
+  state.maskAdjusting = false
+  state.maskHover = false
+  state.maskReveal = false
+  state.polyDrawing = false
+  polyBackupPoints = null
   state.pickTarget = null
   state.pickSelected = null
   state.stampSource = null
   state.cropRect = null
   state.cropAngle = 0
   state.comparing = false
+  state.dofPicking = false
 }
 
 function _stashParams(): void {
@@ -561,11 +616,22 @@ async function _ensureOriginal(id: number): Promise<void> {
 }
 
 function _applyLoaded(meta: { id: number; name?: string; width: number; height: number;
-                              serial: number }, status = ''): void {
+                              serial: number; dof?: api.DofParams | null }, status = ''): void {
   state.currentImageId = meta.id
   state.width = meta.width
   state.height = meta.height
   state.serial = meta.serial
+  if (meta.dof) {
+    state.dofActive = true
+    state.dofFocus = meta.dof.focus
+    state.dofAperture = meta.dof.aperture
+    state.dofRange = meta.dof.dof_range
+    state.dofBokeh = meta.dof.bokeh_highlight
+  } else {
+    state.dofActive = false
+  }
+  state.dofFocusPt = null
+  state.dofPreviewPng = ''
   state.previewFrame?.bmp.close()
   state.fullFrame?.bmp.close()
   state.previewFrame = null
@@ -705,6 +771,7 @@ export function setComparing(on: boolean): void {
 export function resetAll(): void {
   state.adjustments = defaultAdjustments()
   state.activeFilter = ''
+  exitMaskEdit()
   notifyCommittedLabeled('重置全部')
 }
 
@@ -714,8 +781,8 @@ export function toggleBlackwhite(): void {
 }
 
 export async function saveBrowser(format: string): Promise<void> {
-  await api.renderDownload(state.adjustments, format, `photolab.${format}`)
-  state.status = `已下载 photolab.${format}`
+  await api.renderDownload(state.adjustments, format, `fernlens.${format}`)
+  state.status = `已下载 fernlens.${format}`
 }
 
 /** auto.suggest_* 结果按旧版 _apply_adjustment_dict 语义合并（M1 基础影调 + 曲线/色轮/取色点）。 */
@@ -827,7 +894,7 @@ export function exportFilters(ids?: string[]): void {
   if (!list.length) { state.status = '没有可导出的自定义滤镜'; return }
   const payload = list.length === 1
     ? filterToFile(list[0])
-    : { format: 'photolab-filter', version: 1, filters: list.map(filterToFile) }
+    : { format: 'fernlens-filter', version: 1, filters: list.map(filterToFile) }
   downloadJson(filterFileName(list.length === 1 ? list[0].name : '全部'), payload)
   state.status = `已导出 ${list.length} 个滤镜`
 }
@@ -926,42 +993,231 @@ export async function imagePicked(x: number, y: number): Promise<void> {
   }
 }
 
+export type EditorTab = 'light' | 'color' | 'effects' | 'filter' | 'curve' | 'grading' | 'mask' | 'picker' | 'history'
+
 // ------------------------------------------------------------ 蒙版（对照旧 ui_window 蒙版面板语义）
 const MASK_KIND_NAMES: Record<MaskKind, string> = {
-  linear: '线性渐变', radial: '径向渐变', brush: '画笔', ai: 'AI 识别',
+  linear: '线性渐变', radial: '径向渐变', brush: '画笔', polygon: '多边形', ai: 'AI 识别',
+}
+
+let polyBackupPoints: [number, number][] | null = null
+
+export function setActiveTab(next: EditorTab): void {
+  if (state.polyDrawing && next !== 'mask') {
+    finishOrDiscardPendingPolygon()
+  }
+  state.activeTab = next
+  if (state.maskSelected !== null) {
+    state.maskAdjusting = next !== 'mask'
+    if (next === 'mask') state.maskReveal = false
+  }
 }
 
 /** AI 识别目标的显示名（与 auto.AI_MASK_TARGETS 对应）。 */
 export const AI_TARGET_NAMES: Record<AiMaskTarget, string> = {
-  subject: '主体', person: '人物', background: '背景', sky: '天空',
+  subject: '主体',
+  person: '人物',
+  background: '背景',
+  sky: '天空',
+  depth_near: '近景深度',
+  depth_far: '远景深度',
 }
 
-/** AI 识别蒙版（LR 式「选择主体/人物/背景/天空」）。
- *  只走本地像素级引擎（SAM2 + U²-Net）：图像不出本机、免费，不消耗 API。 */
+/** AI 识别蒙版（LR 式「选择主体/人物/背景/天空/景深」）。
+ *  只走本地像素级引擎（SAM2 + U²-Net + Depth Anything V2）：图像不出本机、免费，不消耗 API。 */
 export async function addAiMask(target: AiMaskTarget): Promise<void> {
   if (!state.loaded || state.aiBusy) return
-  if (!state.localAI?.ready) {
-    state.status = '本地蒙版引擎未就绪：请在「AI 设置」里下载本地模型（SAM 2 + U²-Net，约 575MB）'
+  const isDepth = target === 'depth_near' || target === 'depth_far'
+  const ready = isDepth
+    ? !!(state.localAI?.models?.depth_anything_v2?.ready || state.localAI?.ready)
+    : !!state.localAI?.ready
+  if (!ready) {
+    state.status = tx(
+      '本地蒙版引擎未就绪：请在「AI 设置」里下载 HuggingFace 本地模型',
+      'Local model engine not ready: download HuggingFace models in AI Setup',
+    )
     openAiSettings()
     return
   }
   state.aiBusy = target
-  state.status = `AI 识别「${AI_TARGET_NAMES[target]}」中…（本地像素级引擎，约 2~10 秒）`
+  state.status = tx(
+    `AI 识别「${AI_TARGET_NAMES[target]}」中…（本地模型推理中）`,
+    `Running local AI mask (${target})…`,
+  )
   try {
     const r = await api.aiMask(target)
+    finishOrDiscardPendingPolygon()
     const idx = state.adjustments.masks.length + 1
     const m: MaskState = aiMaskPixels(`AI ${AI_TARGET_NAMES[target]} ${idx}`, target,
       r.mask_png ?? '', r.width ?? 0, r.height ?? 0)
     state.adjustments.masks.push(m)
     state.maskSelected = state.adjustments.masks.length - 1
     state.editMode = 'mask'
-    state.status = `已创建「${AI_TARGET_NAMES[target]}」蒙版（像素级），可直接在右侧做局部调整`
-    revealMaskOverlay(2400)          // 先亮 2.4 秒让人确认蒙版范围，随后自动收起
-    notifyCommitted()
+    state.maskAdjusting = false
+    state.polyDrawing = false
+    state.status = tx(
+      `已创建「${AI_TARGET_NAMES[target]}」蒙版（像素级），可直接在右侧做局部调整`,
+      `Created pixel-level AI mask (${target})`,
+    )
+    notifyCommittedLabeled(`AI ${target}`)
   } catch (err) {
-    state.status = `AI 蒙版失败：${err instanceof Error ? err.message : err}`
+    state.status = `AI Mask error: ${err instanceof Error ? err.message : err}`
   } finally {
     state.aiBusy = null
+  }
+}
+
+/** AI 景深调节（Depth Anything V2）：画布点选对焦 + 光学散景虚化应用/清除。 */
+export function setDofPicking(on: boolean): void {
+  state.dofPicking = on
+  if (on) {
+    state.pickTarget = null
+    if (state.editMode === 'stamp') state.editMode = null
+  }
+}
+
+export async function pickDofFocusAt(nx: number, ny: number): Promise<void> {
+  if (!state.loaded) return
+  const cx = Math.max(0, Math.min(1, nx))
+  const cy = Math.max(0, Math.min(1, ny))
+  state.status = tx('正在用 Depth Anything V2 识别对焦点深度…', 'Sampling focal plane with Depth Anything V2…')
+  try {
+    const res = await api.aiDofPick(cx, cy, state.dofRange)
+    state.dofFocus = res.focus
+    state.dofFocusPt = [cx, cy]
+    state.dofPreviewPng = res.depth_preview_png
+    state.dofPicking = false
+    if (state.dofAperture > 0) {
+      await applyDof()
+    } else {
+      state.status = tx(`对焦深度已设为 ${Math.round(res.focus * 100)}%`, `Focal plane set to ${Math.round(res.focus * 100)}%`)
+    }
+  } catch (err) {
+    state.dofPicking = false
+    state.status = `${tx('对焦取点失败：', 'Focus pick failed: ')}${err instanceof Error ? err.message : err}`
+    throw err
+  }
+}
+
+export async function applyDof(opts?: Partial<api.DofParams>): Promise<api.DofResult | null> {
+  if (!state.loaded) return null
+  if (opts?.focus !== undefined) state.dofFocus = opts.focus
+  if (opts?.aperture !== undefined) state.dofAperture = opts.aperture
+  if (opts?.dof_range !== undefined) state.dofRange = opts.dof_range
+  if (opts?.bokeh_highlight !== undefined) state.dofBokeh = opts.bokeh_highlight
+  state.status = tx('AI 景深虚化计算中…', 'Rendering AI Depth of Field bokeh…')
+  try {
+    const res = await api.aiDofApply({
+      focus: state.dofFocus,
+      aperture: state.dofAperture,
+      dof_range: state.dofRange,
+      bokeh_highlight: state.dofBokeh,
+    })
+    state.serial = res.serial
+    state.dofActive = res.active
+    state.dofPreviewPng = res.depth_preview_png
+    state.status = res.active
+      ? tx(
+          `已应用 AI 景深虚化（光圈强度 ${Math.round(res.aperture)}%，对焦 ${Math.round(res.focus * 100)}%）`,
+          `Applied AI Depth of Field (blur ${Math.round(res.aperture)}%, focus ${Math.round(res.focus * 100)}%)`,
+        )
+      : tx('AI 景深强度为 0，保持原图清晰', 'AI Depth of Field blur set to 0')
+    notifyCommittedLabeled(tx('AI 景深虚化', 'AI Depth of Field'))
+    return res
+  } catch (err) {
+    state.status = `${tx('AI 景深虚化失败：', 'AI Depth of Field failed: ')}${err instanceof Error ? err.message : err}`
+    throw err
+  }
+}
+
+export async function clearDof(): Promise<void> {
+  if (!state.loaded) return
+  try {
+    const res = await api.aiDofClear()
+    state.serial = res.serial
+    state.dofActive = false
+    state.dofFocusPt = null
+    state.dofPicking = false
+    state.status = tx('已清除 AI 景深虚化，恢复原图清晰', 'Cleared AI Depth of Field')
+    notifyCommittedLabeled(tx('清除 AI 景深', 'Clear AI DOF'))
+  } catch (err) {
+    state.status = `${tx('清除景深失败：', 'Clear DOF failed: ')}${err instanceof Error ? err.message : err}`
+    throw err
+  }
+}
+
+/** AI 景深立体调色（Depth Anything V2）：生成/更新近景与远景蒙版并注入预设参数。 */
+export async function runDepthRelight(opts: {
+  preset: api.DepthRelightPreset
+  strength: number
+  nearBias: number
+  masksOnly?: boolean
+}): Promise<api.DepthRelightResult | null> {
+  if (!state.loaded) return null
+  state.status = tx('AI 景深立体调色计算中…', 'Computing AI Depth Relight…')
+  try {
+    const res = await api.aiDepthRelight(
+      opts.preset,
+      opts.strength,
+      opts.nearBias,
+      Boolean(opts.masksOnly),
+    )
+    // 替换之前生成的 AI 景深蒙版，保留用户其他蒙版
+    finishOrDiscardPendingPolygon()
+    const kept = state.adjustments.masks.filter(
+      (m) => !(m.kind === 'ai' && (m.ai_target === 'depth_near' || m.ai_target === 'depth_far')),
+    )
+    state.adjustments.masks = [...kept, ...res.masks]
+    state.maskSelected = kept.length < state.adjustments.masks.length ? kept.length : null
+    if (state.maskSelected !== null) {
+      state.editMode = 'mask'
+      state.maskAdjusting = state.activeTab !== 'mask'
+    }
+    state.polyDrawing = false
+    state.status = tx(
+      `已应用 AI 景深立体调色（${res.preset}，共生成 ${res.masks.length} 个深度蒙版）`,
+      `Applied AI Depth Relight (${res.preset}) with ${res.masks.length} depth masks`,
+    )
+    notifyCommittedLabeled(`AI Depth (${res.preset})`)
+    return res
+  } catch (err) {
+    state.status = `${tx('AI 景深失败：', 'Depth Relight failed: ')}${err instanceof Error ? err.message : err}`
+    throw err
+  }
+}
+
+/** AI 参考仿色：提取参考图色调/三路分级/影调参数并应用到当前照片（支持 Ctrl+Z 撤销）。 */
+export async function runColorMatch(opts: {
+  file?: File
+  refId?: number
+  strength: number
+  protectSubject: boolean
+}): Promise<api.ColorMatchResult | null> {
+  if (!state.loaded) return null
+  state.status = tx('AI 参考仿色提取中…', 'Extracting reference color profile…')
+  try {
+    const res = await api.aiColorMatch(opts)
+    const patch = res.adjustments || {}
+    const a = state.adjustments
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) continue
+      if (k === 'curves' && v && typeof v === 'object') {
+        a.curves = { ...a.curves, ...(v as Adjustments['curves']) }
+      } else if (k === 'wheels' && v && typeof v === 'object') {
+        a.wheels = { ...a.wheels, ...(v as Adjustments['wheels']) }
+      } else if (k === 'bw' || k === 'bw_mix' || k === 'masks' || k === 'pickers') {
+        // preserve unless explicitly provided cleanly
+      } else {
+        ;(a as unknown as Record<string, unknown>)[k] = v
+      }
+    }
+    state.activeFilter = ''
+    state.status = res.note || tx('已应用 AI 参考仿色', 'Applied AI Color Match')
+    notifyCommittedLabeled('AI Color Match')
+    return res
+  } catch (err) {
+    state.status = `${tx('参考仿色失败：', 'Color Match failed: ')}${err instanceof Error ? err.message : err}`
+    throw err
   }
 }
 
@@ -972,13 +1228,46 @@ export function targetAdj(): AdjustmentsLike {
   return state.adjustments
 }
 
+function finishOrDiscardPendingPolygon(): void {
+  if (!state.polyDrawing) return
+  const idx = state.maskSelected
+  state.polyDrawing = false
+  if (idx !== null) {
+    const m = state.adjustments.masks[idx]
+    if (m && m.kind === 'polygon' && m.points.length < 3) {
+      if (polyBackupPoints && polyBackupPoints.length >= 3) {
+        m.points = polyBackupPoints
+      } else {
+        state.adjustments.masks.splice(idx, 1)
+        state.maskSelected = null
+        if (state.editMode === 'mask') state.editMode = null
+      }
+    } else if (m && m.kind === 'polygon' && m.points.length >= 3) {
+      notifyCommitted()
+    }
+  }
+  polyBackupPoints = null
+}
+
 export function addMask(kind: MaskKind): void {
   if (!state.loaded) return
+  finishOrDiscardPendingPolygon()
   const m = defaultMask(kind, `${MASK_KIND_NAMES[kind]} ${state.adjustments.masks.length + 1}`)
   state.adjustments.masks.push(m)
   state.maskSelected = state.adjustments.masks.length - 1
   state.editMode = 'mask'
-  revealMaskOverlay(1600)
+  state.maskAdjusting = false
+  state.maskReveal = false
+  if (kind === 'polygon') {
+    polyBackupPoints = null
+    state.polyDrawing = true
+    state.status = tx(
+      '点击图片选取多边形顶点（至少 3 个点），点击起点、双击或按「确认」完成',
+      'Click on image to pick polygon vertices (min 3); click start, double-click, or Confirm',
+    )
+    return
+  }
+  state.polyDrawing = false
   notifyCommitted()
 }
 
@@ -988,36 +1277,59 @@ export function selectMask(index: number | null): void {
     exitMaskEdit()
     return
   }
+  if (state.polyDrawing) {
+    const prevIdx = state.maskSelected
+    const removedBefore = prevIdx !== null
+      && state.adjustments.masks[prevIdx]?.kind === 'polygon'
+      && state.adjustments.masks[prevIdx].points.length < 3
+      && !(polyBackupPoints && polyBackupPoints.length >= 3)
+    finishOrDiscardPendingPolygon()
+    if (removedBefore && index !== null && prevIdx !== null && index > prevIdx) {
+      index -= 1
+    }
+  }
   state.maskSelected = index
+  state.polyDrawing = false
   if (index !== null) {
     state.editMode = 'mask'
     state.pickTarget = null
-    revealMaskOverlay(1400)
+    state.maskAdjusting = state.activeTab !== 'mask'
+    state.maskReveal = false
   } else if (state.editMode === 'mask') {
     state.editMode = null
+    state.maskAdjusting = false
   }
 }
 
 export function exitMaskEdit(): void {
+  finishOrDiscardPendingPolygon()
   state.maskSelected = null
   state.maskHover = false
   state.maskReveal = false
+  state.maskAdjusting = false
+  state.polyDrawing = false
+  polyBackupPoints = null
   if (state.editMode === 'mask') state.editMode = null
   state.status = ''
 }
 
 export function toggleMaskOverlay(): void {
+  if (state.maskOverlay && state.maskAdjusting) {
+    state.maskAdjusting = false
+    state.maskHover = false
+    state.maskReveal = false
+    return
+  }
   state.maskOverlay = !state.maskOverlay
   if (!state.maskOverlay) {
     state.maskHover = false
     state.maskReveal = false
   } else {
-    revealMaskOverlay(1600)
+    state.maskAdjusting = false
   }
 }
 
-/** 短暂显示红色叠加（新建蒙版后、点「预览」或拖动叠加时）。
- *  自动收起，避免调参数时红色一直盖在画面上。 */
+/** 短暂显示红色叠加（预览按钮使用）。 */
 let maskRevealTimer: ReturnType<typeof setTimeout> | undefined
 export function revealMaskOverlay(ms = 1600): void {
   state.maskReveal = true
@@ -1030,25 +1342,101 @@ export function setMaskHover(on: boolean): void {
   state.maskHover = on
 }
 
-/** 当前是否应绘制红色叠加（蒙版选中 + 总开关 + 悬停/短暂显示）。 */
+/** 当前是否应绘制半透明红色叠加：
+ *  蒙版选中后始终显示；在针对蒙版做色彩/影调调整时自动隐藏以方便预览；退出后不显示。 */
 export function maskOverlayVisible(): boolean {
-  return state.editMode === 'mask'
-    && state.maskSelected !== null
-    && state.maskOverlay
-    && (state.maskHover || state.maskReveal)
+  if (state.editMode !== 'mask' || state.maskSelected === null) return false
+  if (!state.maskOverlay) return false
+  if (state.maskHover || state.maskReveal) return true
+  return !state.maskAdjusting
 }
 
 export function deleteMask(index: number): void {
   const list = state.adjustments.masks
   if (index < 0 || index >= list.length) return
+  if (state.maskSelected === index) {
+    state.polyDrawing = false
+    polyBackupPoints = null
+  }
   list.splice(index, 1)
   if (state.maskSelected !== null) {
-    if (state.maskSelected >= list.length) {
-      state.maskSelected = list.length ? list.length - 1 : null
+    if (state.maskSelected === index) {
+      state.maskSelected = list.length ? Math.min(index, list.length - 1) : null
+    } else if (state.maskSelected > index) {
+      state.maskSelected -= 1
     }
-    if (state.maskSelected === null) state.editMode = null
+    if (state.maskSelected === null) {
+      state.editMode = null
+      state.maskAdjusting = false
+    }
   }
   notifyCommitted()
+}
+
+export function undoPolygonPoint(): void {
+  if (!state.polyDrawing || state.maskSelected === null) return
+  const m = state.adjustments.masks[state.maskSelected]
+  if (m?.kind === 'polygon' && m.points.length) {
+    m.points.pop()
+  }
+}
+
+export function clearPolygonPoints(): void {
+  if (!state.polyDrawing || state.maskSelected === null) return
+  const m = state.adjustments.masks[state.maskSelected]
+  if (m?.kind === 'polygon') {
+    m.points = []
+  }
+}
+
+export function confirmPolygonMask(): void {
+  if (!state.polyDrawing || state.maskSelected === null) return
+  const m = state.adjustments.masks[state.maskSelected]
+  if (!m || m.kind !== 'polygon' || m.points.length < 3) return
+  state.polyDrawing = false
+  polyBackupPoints = null
+  state.maskAdjusting = false
+  state.status = tx(
+    `已生成多边形蒙版（${m.points.length} 个顶点），可调整羽化或切换面板进行局部调色`,
+    `Polygon mask created (${m.points.length} vertices); adjust feather or switch tabs to grade`,
+  )
+  notifyCommitted()
+}
+
+export function cancelPolygonDrawing(): void {
+  if (!state.polyDrawing || state.maskSelected === null) return
+  const idx = state.maskSelected
+  const m = state.adjustments.masks[idx]
+  state.polyDrawing = false
+  if (polyBackupPoints && polyBackupPoints.length >= 3 && m?.kind === 'polygon') {
+    m.points = polyBackupPoints
+    polyBackupPoints = null
+    state.status = ''
+    return
+  }
+  polyBackupPoints = null
+  if (m?.kind === 'polygon') {
+    state.adjustments.masks.splice(idx, 1)
+    state.maskSelected = null
+    if (state.editMode === 'mask') state.editMode = null
+  }
+  state.status = ''
+}
+
+export function redrawPolygonMask(index: number): void {
+  const m = state.adjustments.masks[index]
+  if (!m || m.kind !== 'polygon') return
+  finishOrDiscardPendingPolygon()
+  polyBackupPoints = m.points.map(([x, y]) => [x, y] as [number, number])
+  m.points = []
+  state.maskSelected = index
+  state.editMode = 'mask'
+  state.maskAdjusting = false
+  state.polyDrawing = true
+  state.status = tx(
+    '请重新在图片上选择多边形顶点（至少 3 个点）',
+    'Click on image to re-pick polygon vertices (min 3)',
+  )
 }
 
 /** 蒙版几何变化（视口拖动手柄/端点）：只需 preview；松手时 commit。 */
@@ -1107,15 +1495,63 @@ export function clearBrushStrokes(index: number): void {
   }
 }
 
-// ------------------------------------------------------------ 图章（服务端工作副本，对照旧 _on_clone_apply）
+// ------------------------------------------------------------ 图章（Photoshop 式画笔仿制 + 兼容旧矩形）
+export function stampBrushRadiusNorm(): number {
+  return Math.max(0.004, Math.min(0.16, state.stampSize * 0.0022))
+}
+
+export function setStampSourcePt(pt: [number, number]): void {
+  state.stampSourcePt = [
+    Math.max(0, Math.min(1, pt[0])),
+    Math.max(0, Math.min(1, pt[1])),
+  ]
+  state.stampPickingSource = false
+  state.stampOffset = null
+  state.status = tx(
+    '已设定仿制取样点：左键拖拽涂抹覆盖（Alt+点击重新取样，[ / ] 调笔刷大小）',
+    'Clone source set: drag to paint over targets (Alt+Click to re-sample, [ / ] resize brush)',
+  )
+}
+
+export function toggleStampPicking(): void {
+  state.stampPickingSource = !state.stampPickingSource
+  if (state.stampPickingSource) {
+    state.status = tx('请在画面上点击设置仿制取样点', 'Click on the image to set clone sample point')
+  }
+}
+
+export function adjustStampSize(delta: number): void {
+  state.stampSize = Math.max(2, Math.min(100, Math.round(state.stampSize + delta)))
+}
+
+export async function applyStampStroke(
+  srcStart: [number, number],
+  points: [number, number][],
+): Promise<void> {
+  if (!points.length) return
+  try {
+    await api.applyStampBrush(
+      srcStart,
+      points,
+      stampBrushRadiusNorm(),
+      Math.max(0, Math.min(1, state.stampFeather / 100)),
+      Math.max(0.05, Math.min(1, state.stampOpacity / 100)),
+    )
+    state.serial++
+    notifyCommittedLabeled(tx('仿制图章', 'Clone Stamp'))
+  } catch (err) {
+    state.status = `${tx('图章失败：', 'Clone stamp failed: ')}${err instanceof Error ? err.message : err}`
+  }
+}
+
 export function setStampSource(rect: RectNorm): void {
   state.stampSource = rect
-  state.status = '已选源区域：在目标处拖出矩形覆盖'
+  state.status = tx('已选源区域：在目标处拖出矩形覆盖', 'Source area selected')
 }
 
 export async function applyStampAt(dst: RectNorm): Promise<void> {
   if (!state.stampSource) {
-    state.status = '请先按住 Alt 拖出源矩形'
+    state.status = tx('请先按住 Alt 设置取样点', 'Please Alt+Click to set sample source')
     return
   }
   try {
@@ -1123,7 +1559,7 @@ export async function applyStampAt(dst: RectNorm): Promise<void> {
     state.serial++
     notifyCommitted()
   } catch (err) {
-    state.status = `图章失败：${err instanceof Error ? err.message : err}`
+    state.status = `${tx('图章失败：', 'Clone stamp failed: ')}${err instanceof Error ? err.message : err}`
   }
 }
 
@@ -1133,7 +1569,7 @@ export async function stampUndo(): Promise<void> {
     state.serial++
     notifyCommitted()
   } catch (err) {
-    state.status = `撤销失败：${err instanceof Error ? err.message : err}`
+    state.status = `${tx('撤销失败：', 'Undo failed: ')}${err instanceof Error ? err.message : err}`
   }
 }
 
@@ -1142,10 +1578,12 @@ export async function stampClear(): Promise<void> {
     await api.stampClear()
     state.serial++
     state.stampSource = null
+    state.stampSourcePt = null
+    state.stampOffset = null
     notifyCommitted()
-    state.status = '已清除全部图章修改'
+    state.status = tx('已清除全部图章修改', 'Cleared all clone stamp strokes')
   } catch (err) {
-    state.status = `清除失败：${err instanceof Error ? err.message : err}`
+    state.status = `${tx('清除失败：', 'Clear failed: ')}${err instanceof Error ? err.message : err}`
   }
 }
 
@@ -1156,6 +1594,7 @@ const ASPECT_MAP: Record<string, number | null> = {
 
 export function enterCrop(): void {
   if (!state.loaded) return
+  finishOrDiscardPendingPolygon()
   state.editMode = 'crop'
   state.cropRect = { x0: 0, y0: 0, x1: 1, y1: 1 }
   state.cropAngle = 0
@@ -1256,7 +1695,7 @@ export function useEditor() {
 // 自动化测试/调试钩子（生产保留：体积可忽略，供 UI 端到端测试驱动打开文件）
 declare global {
   interface Window {
-    __photolab?: { openFile: typeof openFile; state: typeof state }
+    __fernlens?: { openFile: typeof openFile; state: typeof state }
   }
 }
-window.__photolab = { openFile, state }
+window.__fernlens = { openFile, state }

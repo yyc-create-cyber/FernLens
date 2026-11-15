@@ -5,7 +5,7 @@
  *  Ctrl+O 打开 / Ctrl+S 保存 / Ctrl+R 重置 / `\` 对比原图 / Delete 删除取色点
  *  / Esc 退出编辑 / 0、1、+、- 缩放（Viewport 内）。 */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { NDropdown, NConfigProvider, darkTheme } from 'naive-ui'
+import { NDropdown, NConfigProvider } from 'naive-ui'
 import Viewport from '@/components/Viewport.vue'
 import Filmstrip from '@/components/Filmstrip.vue'
 import Histogram from '@/components/Histogram.vue'
@@ -18,55 +18,67 @@ import MaskPanel from '@/components/MaskPanel.vue'
 import HistoryPanel from '@/components/HistoryPanel.vue'
 import FilterPanel from '@/components/FilterPanel.vue'
 import AiSettings from '@/components/AiSettings.vue'
+import AiStudio from '@/components/AiStudio.vue'
 import AiChat from '@/components/AiChat.vue'
+import PreferencesModal from '@/components/PreferencesModal.vue'
 import Icon from '@/components/Icon'
 import { HINT } from '@/lib/hints'
+import { t, tx } from '@/lib/i18n'
+import { naiveTheme, naiveThemeOverrides } from '@/lib/theme'
 import {
   useEditor, resetAll, notifyChanged, notifyCommitted,
   toggleBlackwhite, saveBrowser, autoRule, autoAI, cancelPick, deletePicker,
   targetAdj, setComparing, enterCrop, cancelCrop, applyCrop, rotate90,
-  stampUndo, stampClear, exitMaskEdit, toggleMaskOverlay, openFiles, openPaths,
-  initLibrary, openAiSettings, openAiChat, aiConfigured, rotateLinearMask, refreshLocalAI,
+  stampUndo, stampClear, toggleStampPicking,
+  exitMaskEdit, toggleMaskOverlay, maskOverlayVisible, setActiveTab,
+  confirmPolygonMask, cancelPolygonDrawing, undoPolygonPoint,
+  openFiles, openPaths,
+  initLibrary, openAiSettings, openAiStudio, openPrefs, openAiChat, aiConfigured,
+  rotateLinearMask, refreshLocalAI,
   undoHistory, redoHistory,
 } from '@/stores/editor'
+import type { EditorTab } from '@/stores/editor'
 import { native, openDesktop, saveDesktop } from '@/api/client'
 
 const store = useEditor()
 const fileInput = ref<HTMLInputElement | null>(null)
 
 // ---- 右侧面板 Tab ----
-type TabKey = 'light' | 'color' | 'effects' | 'filter' | 'curve' | 'grading' | 'mask' | 'picker' | 'history'
-const TABS: { key: TabKey; label: string }[] = [
-  { key: 'light', label: '光线' },
-  { key: 'color', label: '色彩' },
-  { key: 'effects', label: '效果' },
-  { key: 'filter', label: '滤镜' },
-  { key: 'curve', label: '曲线' },
-  { key: 'grading', label: '分级' },
-  { key: 'mask', label: '蒙版' },
-  { key: 'picker', label: '取色' },
-  { key: 'history', label: '历史' },
-]
-const tab = ref<TabKey>('light')
+type TabKey = EditorTab
+const TABS = computed<{ key: TabKey; label: string }[]>(() => [
+  { key: 'light', label: tx('光线', 'Light') },
+  { key: 'color', label: t('tab.basic') },
+  { key: 'effects', label: tx('效果', 'Effects') },
+  { key: 'filter', label: t('tab.filters') },
+  { key: 'curve', label: t('tab.curve') },
+  { key: 'grading', label: t('tab.grading') },
+  { key: 'mask', label: t('tab.mask') },
+  { key: 'picker', label: t('tab.picker') },
+  { key: 'history', label: t('tab.history') },
+])
+const tab = computed<TabKey>({
+  get: () => store.activeTab,
+  set: (v) => setActiveTab(v),
+})
 
 // ---- 面板目标（选中蒙版 → 局部参数）----
 const target = computed(() => targetAdj())
 const isMaskTarget = computed(() => store.maskSelected !== null)
 const maskName = computed(() => {
   const i = store.maskSelected
-  return i === null ? '' : store.adjustments.masks[i]?.name || '蒙版'
+  return i === null ? '' : store.adjustments.masks[i]?.name || t('tab.mask')
 })
 
 // ---- 保存 ----
-const saveOptions = [
-  { label: 'PNG（无损）', key: 'png' },
-  { label: 'JPEG（质量 95）', key: 'jpg' },
+const saveOptions = computed(() => [
+  { label: tx('PNG（无损）', 'PNG (Lossless)'), key: 'png' },
+  { label: tx('JPEG（质量 95）', 'JPEG (95%)'), key: 'jpg' },
   { label: 'WebP', key: 'webp' },
-]
-const rotateOptions = [
-  { label: '向左旋转 90°', key: 'left' },
-  { label: '向右旋转 90°', key: 'right' },
-]
+])
+const rotateOptions = computed(() => [
+  { label: t('crop.rotateL'), key: 'left' },
+  { label: t('crop.rotateR'), key: 'right' },
+])
 
 function onOpenClick(): void {
   if (native) {
@@ -95,7 +107,7 @@ async function onFileChosen(e: Event): Promise<void> {
 async function onSavePick(key: string): Promise<void> {
   try {
     if (native) {
-      const path = await saveDesktop(store.adjustments, `photolab.${key}`)
+      const path = await saveDesktop(store.adjustments, `fernlens.${key}`)
       if (path) store.status = `已保存：${path}`
     } else {
       await saveBrowser(key)
@@ -135,10 +147,12 @@ function toggleCrop(): void {
 function toggleStamp(): void {
   if (stampActive.value) {
     store.editMode = null
+    store.stampPickingSource = false
     store.status = ''
   } else {
+    if (store.editMode === 'mask') exitMaskEdit()
     store.editMode = 'stamp'
-    store.status = '图章：Alt+拖动选源矩形，直接拖动覆盖目标区域'
+    store.status = store.stampSourcePt ? t('stamp.hintReady') : t('stamp.hintNeedSrc')
   }
 }
 function toggleCompare(): void {
@@ -152,14 +166,15 @@ function onRotate(key: string): void {
 }
 
 // ---- 裁剪条 ----
-const aspectOptions = [
-  { label: '自由', key: 'free' }, { label: '原始', key: 'orig' },
+const aspectOptions = computed(() => [
+  { label: t('crop.ratioFree'), key: 'free' },
+  { label: t('crop.ratioOrig'), key: 'orig' },
   { label: '1:1', key: '1:1' }, { label: '3:2', key: '3:2' },
   { label: '4:3', key: '4:3' }, { label: '16:9', key: '16:9' },
-  { label: '2:3（转置）', key: '3:2:t' }, { label: '9:16（转置）', key: '16:9:t' },
-]
+  { label: '2:3', key: '3:2:t' }, { label: '9:16', key: '16:9:t' },
+])
 const aspectLabel = computed(() =>
-  aspectOptions.find(o => o.key === store.cropAspect)?.label ?? '自由')
+  aspectOptions.value.find(o => o.key === store.cropAspect)?.label ?? t('crop.ratioFree'))
 
 // ---- 拖放打开 ----
 const dragOver = ref(false)
@@ -213,14 +228,22 @@ function onKey(e: KeyboardEvent): void {
     e.preventDefault(); redoHistory(); return
   }
   if (e.key === '\\') { setComparing(true); return }
+  if (e.key === 'Enter' && store.polyDrawing) {
+    e.preventDefault(); confirmPolygonMask(); return
+  }
   if (e.key === 'Enter' && cropActive.value) {
     e.preventDefault(); void applyCrop(); return
   }
+  if (e.key === 'Backspace' && store.polyDrawing) {
+    e.preventDefault(); undoPolygonPoint(); return
+  }
   if (e.key === 'Delete') {
+    if (store.polyDrawing) { e.preventDefault(); undoPolygonPoint(); return }
     if (store.pickSelected !== null) deletePicker(store.pickSelected)
     return
   }
   if (e.key === 'Escape') {
+    if (store.polyDrawing) { cancelPolygonDrawing(); return }
     if (store.pickTarget !== null) { cancelPick(); return }
     if (cropActive.value) { cancelCrop(); return }
     if (stampActive.value) { toggleStamp(); return }
@@ -254,56 +277,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('keyup', onKeyUp)
 })
 
-const themeOverrides = {
-  common: {
-    primaryColor: '#7d8bff',
-    primaryColorHover: '#9aa5ff',
-    primaryColorPressed: '#6b78e6',
-    primaryColorSuppl: '#7d8bff',
-    bodyColor: '#0e1014',
-    cardColor: '#12151a',
-    modalColor: '#12151a',
-    popoverColor: '#161a20',
-    tableColor: '#0e1014',
-    inputColor: '#0a0c10',
-    borderColor: 'rgba(255,255,255,0.11)',
-    dividerColor: 'rgba(255,255,255,0.07)',
-    textColorBase: '#ecedf1',
-    textColor1: '#ecedf1',
-    textColor2: '#99a0ac',
-    textColor3: '#616875',
-    placeholderColor: '#5b626e',
-    hoverColor: 'rgba(255,255,255,0.06)',
-    borderRadius: '9px',
-    fontSize: '12.5px',
-  },
-  Button: {
-    colorSecondary: '#181c23',
-    colorSecondaryHover: '#1f242c',
-    colorSecondaryPressed: '#141821',
-    textColorSecondary: '#c6cbd4',
-    borderSecondary: '1px solid rgba(255,255,255,0.10)',
-  },
-  Switch: {
-    railColor: 'rgba(255,255,255,0.14)',
-    railColorActive: '#7d8bff',
-    buttonColor: '#e9ebf0',
-  },
-  Slider: {
-    railColor: 'rgba(255,255,255,0.10)',
-    railColorHover: 'rgba(255,255,255,0.16)',
-    fillColor: 'rgba(255,255,255,0.6)',
-    fillColorHover: 'rgba(255,255,255,0.75)',
-    handleColor: '#f1f2f5',
-  },
-  Internal: {
-    color: '#12151a',
-  },
-}
 </script>
 
 <template>
-  <NConfigProvider :theme="darkTheme" :theme-overrides="themeOverrides" class="provider">
+  <NConfigProvider :theme="naiveTheme" :theme-overrides="naiveThemeOverrides" class="provider">
     <div
       class="app"
       @dragenter="onDragEnter"
@@ -319,65 +296,71 @@ const themeOverrides = {
             <path d="M12 3v9M20.4 7.5 12 12M20.4 16.5 12 12M12 21v-9M3.6 16.5 12 12M3.6 7.5 12 12"
                   stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
           </svg>
-          <span class="brand-name">PhotoLab</span>
-          <span v-if="store.busy" class="pulse" title="处理中…" />
+          <span class="brand-name">FernLens</span>
+          <span v-if="store.busy" class="pulse" />
         </div>
 
         <input ref="fileInput" type="file" accept="image/*,.dng,.cr2,.cr3,.nef,.arw,.rw2,.raf,.orf" hidden multiple
                @change="onFileChosen" />
 
-        <button class="btn" :title="native ? '打开照片' : '打开照片（可多选）'" @click="onOpenClick">
-          <Icon name="open" /> 打开
+        <button class="btn" :title="t('app.openTip')" @click="onOpenClick">
+          <Icon name="open" /> {{ t('app.open') }}
         </button>
         <NDropdown :options="saveOptions" trigger="click" @select="onSavePick">
-          <button class="btn solid" :disabled="!store.loaded" title="导出（Ctrl+S 存 PNG）">
-            <Icon name="save" /> 保存 <Icon name="chevron" :size="12" />
+          <button class="btn solid" :disabled="!store.loaded" :title="t('app.saveAsTip')">
+            <Icon name="save" /> {{ t('app.saveAs') }} <Icon name="chevron" :size="12" />
           </button>
         </NDropdown>
-        <button class="btn icon" :disabled="!store.loaded" title="重置全部参数（Ctrl+R）" @click="resetAll">
+        <button class="btn icon" :disabled="!store.loaded" :title="t('app.resetAllTip')" @click="resetAll">
           <Icon name="reset" />
         </button>
 
         <span class="sep" />
 
-        <button class="btn" :disabled="!store.loaded" title="自动调整（规则版）" @click="onAuto">
-          <Icon name="auto" /> 自动
+        <button class="btn" :disabled="!store.loaded" :title="t('app.autoTip')" @click="onAuto">
+          <Icon name="auto" /> {{ t('app.auto') }}
         </button>
-        <button class="btn" :disabled="!store.loaded || aiRunning" title="AI 自动调色" @click="onAutoAI">
-          <Icon name="ai" /> {{ aiRunning ? '调色中…' : 'AI' }}
+        <button class="btn" :disabled="!store.loaded || aiRunning" :title="t('app.aiGradeTip')" @click="onAutoAI">
+          <Icon name="ai" /> {{ aiRunning ? '…' : t('app.aiGrade') }}
         </button>
-        <button class="btn" :disabled="!store.loaded" title="AI 对话 / 参数 / 生图" @click="openAiChat">
-          <Icon name="chat" /> 对话
+        <button class="btn" :class="{ on: store.aiStudioOpen }" :disabled="!store.loaded" :title="t('app.aiStudioTip')" @click="openAiStudio">
+          <Icon name="layers" /> {{ t('app.aiStudio') }}
+        </button>
+        <button class="btn" :disabled="!store.loaded" :title="t('aiChat.title')" @click="openAiChat">
+          <Icon name="chat" /> {{ tx('对话', 'Chat') }}
         </button>
 
         <span class="sep" />
 
-        <button class="btn" :class="{ on: cropActive }" :disabled="!store.loaded" title="裁剪 / 拉直" @click="toggleCrop">
-          <Icon name="crop" /> 裁剪
+        <button class="btn" :class="{ on: cropActive }" :disabled="!store.loaded" :title="t('app.cropTip')" @click="toggleCrop">
+          <Icon name="crop" /> {{ t('app.crop') }}
         </button>
-        <button class="btn" :class="{ on: stampActive }" :disabled="!store.loaded" title="仿制图章" @click="toggleStamp">
-          <Icon name="stamp" /> 图章
+        <button class="btn" :class="{ on: stampActive }" :disabled="!store.loaded" :title="t('app.stampTip')" @click="toggleStamp">
+          <Icon name="stamp" /> {{ t('app.stamp') }}
         </button>
-        <button class="btn" :class="{ on: tab === 'mask' }" :disabled="!store.loaded" title="蒙版" @click="openMaskTab">
-          <Icon name="mask" /> 蒙版
+        <button class="btn" :class="{ on: tab === 'mask' }" :disabled="!store.loaded" :title="t('tab.mask')" @click="openMaskTab">
+          <Icon name="mask" /> {{ t('tab.mask') }}
         </button>
         <NDropdown :options="rotateOptions" trigger="click" @select="onRotate">
-          <button class="btn icon" :disabled="!store.loaded" title="旋转 90°">
+          <button class="btn icon" :disabled="!store.loaded" :title="t('crop.rotateR')">
             <Icon name="rotateR" />
           </button>
         </NDropdown>
 
         <span class="grow" />
 
-        <div class="seg" role="group" aria-label="色彩模式">
-          <button :class="{ on: !blackwhite }" @click="setBlackwhite(false)">彩色</button>
-          <button :class="{ on: blackwhite }" :disabled="!store.loaded" @click="setBlackwhite(true)">黑白</button>
+        <div class="seg" role="group">
+          <button :class="{ on: !blackwhite }" @click="setBlackwhite(false)">{{ tx('彩色', 'Color') }}</button>
+          <button :class="{ on: blackwhite }" :disabled="!store.loaded" @click="setBlackwhite(true)">{{ t('bw.enable') }}</button>
         </div>
         <button class="btn" :class="{ on: comparing }" :disabled="!store.loaded || !store.originalBmp"
-                title="按住与按住不放对比原图（\\）" @click="toggleCompare">
-          <Icon name="compare" /> 对比
+                :title="t('app.compareTip')" @click="toggleCompare">
+          <Icon name="compare" /> {{ tx('对比', 'Before') }}
         </button>
-        <button class="btn icon" :title="aiConfigured() ? 'AI 设置' : 'AI 未配置，点击设置端点'" @click="openAiSettings">
+        <button class="btn" :title="t('app.prefsTip')" @click="openPrefs">
+          <Icon name="palette" /> {{ t('app.prefs') }}
+        </button>
+        <button class="btn icon" :title="t('app.aiSettingsTip')" @click="openAiSettings">
           <Icon name="settings" />
           <span v-if="!aiConfigured()" class="alert-dot" />
         </button>
@@ -387,33 +370,59 @@ const themeOverrides = {
       <div v-if="cropActive" class="subbar">
         <NDropdown :options="aspectOptions" trigger="click"
                    @select="(k: string) => store.cropAspect = k">
-          <button class="btn outline">比例 · {{ aspectLabel }} <Icon name="chevron" :size="12" /></button>
+          <button class="btn outline">{{ t('crop.ratio') }} · {{ aspectLabel }} <Icon name="chevron" :size="12" /></button>
         </NDropdown>
         <div class="sub-slider">
-          <MiniSlider label="拉直" :hint="HINT.cropAngle" :value="store.cropAngle"
+          <MiniSlider :label="t('crop.angle')" :hint="HINT.cropAngle" :value="store.cropAngle"
                       :min="-45" :max="45" :step="0.1"
-                      :decimals="1" suffix="°" :label-width="30"
+                      :decimals="1" suffix="°" :label-width="52"
                       @update:value="(v: number) => { store.cropAngle = v; notifyChanged() }" />
         </div>
         <span class="grow" />
-        <span class="sub-hint">拖动裁剪框与手柄 · <span class="kbd">Enter</span> 应用 · <span class="kbd">Esc</span> 取消</span>
-        <button class="btn solid" :disabled="store.cropPending" @click="applyCrop">应用</button>
-        <button class="btn" @click="cancelCrop">取消</button>
+        <span class="sub-hint"><span class="kbd">Enter</span> {{ t('crop.apply') }} · <span class="kbd">Esc</span> {{ t('crop.done') }}</span>
+        <button class="btn solid" :disabled="store.cropPending" @click="applyCrop">{{ t('crop.apply') }}</button>
+        <button class="btn" @click="cancelCrop">{{ t('crop.done') }}</button>
       </div>
 
-      <!-- 图章条 -->
-      <div v-if="stampActive" class="subbar">
-        <div class="sub-slider">
-          <MiniSlider label="羽化" :hint="HINT.stampFeather" :value="store.stampFeather"
-                      :min="0" :max="100"
-                      :label-width="30"
-                      @update:value="(v: number) => store.stampFeather = v" />
+      <!-- Photoshop 式仿制图章工具条 -->
+      <div v-if="stampActive" class="subbar stamp-bar">
+        <div class="sub-slider sm">
+          <MiniSlider :label="t('stamp.size')" :hint="t('stamp.sizeTip')" :value="store.stampSize"
+                      :min="2" :max="100" :label-width="38"
+                      @update:value="(v: number) => (store.stampSize = v)" />
         </div>
-        <button class="btn outline" @click="store.stampSource = null; store.status = '按住 Alt 拖出新源矩形'">重选源区</button>
-        <button class="btn outline" @click="stampUndo()">撤销一笔</button>
-        <button class="btn outline" @click="stampClear()">全部清除</button>
+        <div class="sub-slider sm">
+          <MiniSlider :label="t('stamp.feather')" :hint="t('stamp.featherTip')" :value="store.stampFeather"
+                      :min="0" :max="100" :label-width="46"
+                      @update:value="(v: number) => (store.stampFeather = v)" />
+        </div>
+        <div class="sub-slider sm">
+          <MiniSlider :label="t('stamp.opacity')" :hint="t('stamp.opacityTip')" :value="store.stampOpacity"
+                      :min="10" :max="100" unit="%" :label-width="52"
+                      @update:value="(v: number) => (store.stampOpacity = v)" />
+        </div>
+        <button
+          class="btn outline"
+          :class="{ on: store.stampAligned }"
+          :title="t('stamp.alignedTip')"
+          @click="store.stampAligned = !store.stampAligned"
+        >
+          {{ t('stamp.aligned') }}
+        </button>
+        <button
+          class="btn outline"
+          :class="{ on: store.stampPickingSource }"
+          :title="t('stamp.pickTip')"
+          @click="toggleStampPicking"
+        >
+          <Icon name="crosshair" :size="13" />
+          {{ store.stampPickingSource ? t('stamp.pickActive') : t('stamp.pick') }}
+        </button>
+        <button class="btn outline" @click="stampUndo()">{{ t('stamp.undo') }}</button>
+        <button class="btn outline" @click="stampClear()">{{ t('stamp.clear') }}</button>
         <span class="grow" />
-        <span class="sub-hint"><span class="kbd">Alt</span> + 拖动 选源 · 直接拖动 覆盖</span>
+        <span class="sub-hint"><span class="kbd">Alt</span>+Click · <span class="kbd">[</span><span class="kbd">]</span></span>
+        <button class="btn solid" @click="toggleStamp">{{ t('stamp.done') }}</button>
       </div>
 
       <!-- 舞台 + 面板 -->
@@ -442,58 +451,62 @@ const themeOverrides = {
             <!-- 局部调整提示条 -->
             <div v-if="isMaskTarget" class="banner">
               <span class="banner-dot" />
-              <span class="banner-text">{{ maskName }} · 局部调整中</span>
-              <button class="mini" @click="exitMaskEdit()">完成</button>
+              <span class="banner-text">{{ maskName }} · {{ tx('局部调整中', 'Local Mask Edit') }}</span>
+              <button class="mini square" :class="{ on: maskOverlayVisible() }"
+                      :title="`${t('mask.showOverlay')} (O)`" @click="toggleMaskOverlay()">
+                <Icon name="eye" :size="11" />
+              </button>
+              <button class="mini" @click="exitMaskEdit()">{{ t('crop.done') }}</button>
             </div>
 
             <template v-if="!store.loaded">
               <div class="pane-empty">
                 <Icon name="image" :size="26" :stroke="1.2" />
-                <p>还没有打开照片</p>
-                <span>把图片拖进窗口，或点左上角「打开」</span>
+                <p>{{ t('app.noImage') }}</p>
+                <span>{{ t('app.dropTitle') }}</span>
               </div>
             </template>
 
             <template v-else>
               <div v-if="tab === 'light'" class="stack">
-                <SliderRow label="曝光" :hint="HINT.exposure"
+                <SliderRow :label="t('param.exposure')" :hint="HINT.exposure"
                            :min="-5" :max="5" :step="0.01" :decimals="2" suffix=" EV"
                            v-model="target.exposure" @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="对比度" :hint="HINT.contrast" :min="-100" :max="100" v-model="target.contrast"
+                <SliderRow :label="t('param.contrast')" :hint="HINT.contrast" :min="-100" :max="100" v-model="target.contrast"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="高光" :hint="HINT.highlights" :min="-100" :max="100" v-model="target.highlights"
+                <SliderRow :label="t('param.highlights')" :hint="HINT.highlights" :min="-100" :max="100" v-model="target.highlights"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="阴影" :hint="HINT.shadows" :min="-100" :max="100" v-model="target.shadows"
+                <SliderRow :label="t('param.shadows')" :hint="HINT.shadows" :min="-100" :max="100" v-model="target.shadows"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="白色" :hint="HINT.whites" :min="-100" :max="100" v-model="target.whites"
+                <SliderRow :label="t('param.whites')" :hint="HINT.whites" :min="-100" :max="100" v-model="target.whites"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="黑色" :hint="HINT.blacks" :min="-100" :max="100" v-model="target.blacks"
+                <SliderRow :label="t('param.blacks')" :hint="HINT.blacks" :min="-100" :max="100" v-model="target.blacks"
                            @input="notifyChanged" @release="notifyCommitted" />
               </div>
 
               <div v-else-if="tab === 'color'" class="stack">
-                <SliderRow label="色温" :hint="HINT.temperature" :min="-100" :max="100" v-model="target.temperature"
+                <SliderRow :label="t('param.temp')" :hint="HINT.temperature" :min="-100" :max="100" v-model="target.temperature"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="色调" :hint="HINT.tint" :min="-100" :max="100" v-model="target.tint"
+                <SliderRow :label="t('param.tint')" :hint="HINT.tint" :min="-100" :max="100" v-model="target.tint"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="饱和度" :hint="HINT.saturation" :min="-100" :max="100" v-model="target.saturation"
+                <SliderRow :label="t('param.saturation')" :hint="HINT.saturation" :min="-100" :max="100" v-model="target.saturation"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow v-if="!isMaskTarget" label="自然饱和度" :hint="HINT.vibrance"
+                <SliderRow v-if="!isMaskTarget" :label="t('param.vibrance')" :hint="HINT.vibrance"
                            :min="-100" :max="100"
                            v-model="store.adjustments.vibrance"
                            @input="notifyChanged" @release="notifyCommitted" />
               </div>
 
               <div v-else-if="tab === 'effects'" class="stack">
-                <SliderRow label="清晰度" :hint="HINT.clarity" :min="-100" :max="100" v-model="target.clarity"
+                <SliderRow :label="t('param.clarity')" :hint="HINT.clarity" :min="-100" :max="100" v-model="target.clarity"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="降噪" :hint="HINT.denoise" :min="0" :max="100" v-model="target.denoise"
+                <SliderRow :label="t('param.denoise')" :hint="HINT.denoise" :min="0" :max="100" v-model="target.denoise"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="锐度" :hint="HINT.sharpen" :min="0" :max="100" v-model="target.sharpen"
+                <SliderRow :label="t('param.sharpness')" :hint="HINT.sharpen" :min="0" :max="100" v-model="target.sharpen"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <SliderRow label="去朦胧" :hint="HINT.dehaze" :min="-100" :max="100" v-model="target.dehaze"
+                <SliderRow :label="t('param.dehaze')" :hint="HINT.dehaze" :min="-100" :max="100" v-model="target.dehaze"
                            @input="notifyChanged" @release="notifyCommitted" />
-                <p class="pane-tip">降噪分亮/色两路：色度重滤去色斑，亮度轻滤保纹理。</p>
+                <p class="pane-tip">{{ tx('降噪分亮/色两路：色度重滤去色斑，亮度轻滤保纹理。', 'Split chroma & luma noise reduction preserves fine textures while removing color blotches.') }}</p>
               </div>
 
               <FilterPanel v-else-if="tab === 'filter'" />
@@ -516,10 +529,10 @@ const themeOverrides = {
       <!-- 状态栏 -->
       <footer class="statusbar">
         <span v-if="store.loaded" class="num">{{ store.width }} × {{ store.height }}</span>
-        <span v-if="store.meta" class="dim">{{ store.meta.gpu ? 'GPU 加速' : 'CPU 渲染' }}</span>
-        <span v-if="cropActive" class="dim">裁剪模式</span>
-        <span v-else-if="stampActive" class="dim">图章模式</span>
-        <span v-else-if="isMaskTarget" class="dim">蒙版局部编辑</span>
+        <span v-if="store.meta" class="dim">{{ store.meta.gpu ? tx('GPU 加速', 'GPU Accelerated') : tx('CPU 渲染', 'CPU Render') }}</span>
+        <span v-if="cropActive" class="dim">{{ t('crop.title') }}</span>
+        <span v-else-if="stampActive" class="dim">{{ t('stamp.title') }}</span>
+        <span v-else-if="isMaskTarget" class="dim">{{ tx('蒙版局部编辑', 'Local Mask Edit') }}</span>
         <span class="grow" />
         <span class="msg">{{ store.status }}</span>
       </footer>
@@ -528,12 +541,14 @@ const themeOverrides = {
       <div v-if="dragOver" class="dropzone">
         <div class="dropzone-inner">
           <Icon name="image" :size="30" :stroke="1.2" />
-          <span>松开以打开照片</span>
+          <span>{{ tx('松开以打开照片', 'Drop to open photos') }}</span>
         </div>
       </div>
     </div>
     <AiSettings />
+    <AiStudio />
     <AiChat />
+    <PreferencesModal />
   </NConfigProvider>
 </template>
 
@@ -550,32 +565,60 @@ const themeOverrides = {
   overflow: hidden;
 }
 
+/* Soft ambient blue layer behind the frosted-glass topbar & sidebar in light/dark themes */
+:global(:root[data-theme="light"]) .app {
+  background:
+    radial-gradient(650px 180px at 88% 4%, rgba(56, 189, 248, 0.24), transparent 72%),
+    radial-gradient(480px 360px at 94% 62%, rgba(96, 165, 250, 0.22), transparent 74%),
+    radial-gradient(520px 140px at 20% 0%, rgba(147, 197, 253, 0.24), transparent 70%),
+    #ffffff;
+}
+:global(:root[data-theme="dark"]) .app {
+  background:
+    radial-gradient(650px 180px at 86% 4%, rgba(30, 64, 175, 0.34), transparent 72%),
+    radial-gradient(500px 380px at 94% 65%, rgba(29, 78, 216, 0.26), transparent 74%),
+    radial-gradient(520px 140px at 20% 0%, rgba(37, 99, 235, 0.22), transparent 70%),
+    #000000;
+}
+
 /* ---------- 顶栏 ---------- */
 .topbar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: 52px;
-  padding: 0 12px 0 18px;
-  background: var(--panel);
+  flex-wrap: wrap;
+  gap: 3px;
+  min-height: 48px;
+  padding: 5px 12px 5px 14px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-bottom: 1px solid var(--line);
-  z-index: 3;
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.45);
+  z-index: 4;
+  box-shadow: var(--glass-shadow);
+}
+.topbar :deep(.btn) {
+  height: 28px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+.topbar :deep(.btn.icon) {
+  width: 28px;
+  padding: 0;
 }
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
-  margin-right: 18px;
+  gap: 8px;
+  margin-right: 12px;
   user-select: none;
+  flex: none;
 }
 .mark {
   width: 21px;
   height: 21px;
   color: var(--accent);
-  opacity: 0.95;
-  filter: drop-shadow(0 0 6px rgba(224, 161, 99, 0.35));
+  opacity: 0.96;
 }
 .brand-name {
   font-family: var(--font-brand);
@@ -589,22 +632,21 @@ const themeOverrides = {
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 0 0 var(--accent-soft);
   animation: pulse 1.5s var(--ease) infinite;
 }
 @keyframes pulse {
-  0% { box-shadow: 0 0 0 0 rgba(224, 161, 99, 0.55); }
-  70% { box-shadow: 0 0 0 7px rgba(224, 161, 99, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(224, 161, 99, 0); }
+  0% { box-shadow: 0 0 0 0 var(--accent-soft); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 .sep {
   width: 1px;
   height: 20px;
-  margin: 0 9px;
+  margin: 0 6px;
   background: linear-gradient(180deg, transparent, var(--line-2), transparent);
   flex: none;
 }
-.grow { flex: 1; }
+.grow { flex: 1; min-width: 8px; }
 .alert-dot {
   position: absolute;
   top: 5px;
@@ -621,19 +663,23 @@ const themeOverrides = {
   flex: none;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
-  height: 42px;
-  padding: 0 16px;
-  background: var(--panel-2);
+  min-height: 42px;
+  padding: 4px 16px;
+  background: var(--glass-sub);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-bottom: 1px solid var(--line);
-  box-shadow: inset 0 1px 0 rgba(255, 243, 228, 0.03);
+  z-index: 3;
   animation: slide-down 0.16s var(--ease);
 }
 @keyframes slide-down {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: none; }
 }
-.sub-slider { width: 210px; }
+.sub-slider { width: 200px; }
+.sub-slider.sm { width: 158px; }
 .sub-hint { font-size: 10.5px; color: var(--text-3); }
 
 /* ---------- 主体 ---------- */
@@ -653,41 +699,49 @@ const themeOverrides = {
 /* ---------- 右侧面板 ---------- */
 .side {
   flex: none;
-  width: 340px;
+  width: 348px;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--panel);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-left: 1px solid var(--line);
-  box-shadow: -1px 0 0 rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-shadow);
+  z-index: 2;
 }
 .side-head {
   flex: none;
-  padding: 14px 16px 12px;
-  background: radial-gradient(120% 100% at 50% 0%, rgba(224, 161, 99, 0.05), transparent 70%);
+  padding: 12px 16px 10px;
+  background: radial-gradient(120% 100% at 50% 0%, var(--accent-soft), transparent 72%);
 }
 .tabs {
   flex: none;
   display: flex;
-  gap: 2px;
-  padding: 0 8px;
+  align-items: center;
+  gap: 1px;
+  padding: 0 6px;
   border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.tabs::-webkit-scrollbar { display: none; }
 .tab {
   position: relative;
-  flex: 1;
+  flex: 1 0 auto;
   height: 32px;
+  padding: 0 3px;
   border: 0;
   background: transparent;
   color: var(--text-3);
-  font-size: 10.5px;
-  letter-spacing: 0.02em;
+  font-size: 10px;
+  letter-spacing: 0;
   white-space: nowrap;
   cursor: pointer;
   transition: color 0.14s var(--ease);
 }
 .tab:hover { color: var(--text-2); }
-.tab.on { color: var(--text); }
+.tab.on { color: var(--text); font-weight: 600; }
 .tab.on::after {
   content: "";
   position: absolute;
@@ -698,7 +752,6 @@ const themeOverrides = {
   margin-left: -8px;
   border-radius: 2px;
   background: var(--accent);
-  box-shadow: 0 0 8px rgba(224, 161, 99, 0.6);
 }
 .side-body {
   flex: 1;
@@ -763,11 +816,14 @@ const themeOverrides = {
   gap: 14px;
   height: 28px;
   padding: 0 16px;
-  background: var(--panel);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-top: 1px solid var(--line);
   font-size: 10.5px;
   letter-spacing: 0.03em;
   color: var(--text-2);
+  z-index: 2;
 }
 .dim { color: var(--text-3); }
 .msg { color: var(--text-2); }
@@ -780,8 +836,9 @@ const themeOverrides = {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(6, 5, 4, 0.74);
-  backdrop-filter: blur(6px) saturate(0.9);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   pointer-events: none;
 }
 .dropzone-inner {
@@ -792,10 +849,10 @@ const themeOverrides = {
   padding: 38px 52px;
   border-radius: 18px;
   border: 1px dashed var(--accent-line);
-  background: radial-gradient(120% 120% at 50% 0%, rgba(224, 161, 99, 0.10), rgba(224, 161, 99, 0.03));
+  background: var(--glass-modal);
   color: var(--accent-text);
   font-size: 13px;
   letter-spacing: 0.04em;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
 }
 </style>

@@ -1,4 +1,4 @@
-"""PhotoLab GPU 加速（可选）：OpenCL 融合内核。
+"""FernLens GPU 加速（可选）：OpenCL 融合内核。
 
 设计：
 - 通过 PyOpenCL 自动探测 OpenCL 设备，只使用 GPU（NVIDIA GeForce / AMD / Intel
@@ -9,7 +9,7 @@
   含效果（卷积类）/蒙版/取色器时仍走 CPU（见 core._gpu_eligible），
   避免设备间来回搬运抵消收益。
 - GPU 与 CPU 的浮点实现存在微小舍入差异，属正常（视觉不可辨）。
-- 环境变量 PHOTOLAB_NO_GPU=1 可强制关闭。
+- 环境变量 FERNLENS_NO_GPU=1 可强制关闭。
 """
 from __future__ import annotations
 
@@ -217,9 +217,9 @@ def _init():
                 "bufs": {},   # npix -> 缓冲区组（保留少量，预览/全图来回切换不抖动）
                 "desc": f"{dev.name.strip()} ({plat_name})",
             }
-            print(f"[PhotoLab] GPU 加速已启用：{_state['desc']}", flush=True)
+            print(f"[FernLens] GPU 加速已启用：{_state['desc']}", flush=True)
         except Exception as exc:
-            print(f"[PhotoLab] GPU 加速不可用（{exc}），使用 CPU 多核", flush=True)
+            print(f"[FernLens] GPU 加速不可用（{exc}），使用 CPU 多核", flush=True)
             _state = False
         return _state
 
@@ -249,7 +249,7 @@ def process_simple(params, lin: np.ndarray) -> np.ndarray | None:
         if not _fail_logged:
             _fail_logged = True
             traceback.print_exc()
-            print("[PhotoLab] GPU 处理失败，本次已回退 CPU", flush=True)
+            print("[FernLens] GPU 处理失败，本次已回退 CPU", flush=True)
         return None
 
 
@@ -371,7 +371,7 @@ def process_basic_linear(params, lin: np.ndarray) -> np.ndarray | None:
         if not _fail_logged:
             _fail_logged = True
             traceback.print_exc()
-            print("[PhotoLab] GPU 基础影调失败，本次已回退 CPU", flush=True)
+            print("[FernLens] GPU 基础影调失败，本次已回退 CPU", flush=True)
         return None
 
 

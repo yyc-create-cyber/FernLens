@@ -1,10 +1,10 @@
-/* PhotoLab Electron 主进程：
- *  - 拉起 Python sidecar（打包后 resources/backend/photolab-server[.exe]，开发时 .venv 的 python）
- *  - 解析 stdout 的 PHOTOLAB_SERVER_READY 行拿到端口与 token，加载本地 UI
+/* FernLens Electron 主进程：
+ *  - 拉起 Python sidecar（打包后 resources/backend/fernlens-server[.exe]，开发时 .venv 的 python）
+ *  - 解析 stdout 的 FERNLENS_SERVER_READY 行拿到端口与 token，加载本地 UI
  *  - 原生打开/保存对话框（渲染数据由后端 /api/render 生成，主进程负责落盘）
  *  - 生产环境尝试 electron-updater 自动更新（GitHub Releases）
  *
- * 跨平台：Windows 用 photolab-server.exe，macOS/Linux 用无扩展名的同目录二进制；
+ * 跨平台：Windows 用 fernlens-server.exe，macOS/Linux 用无扩展名的同目录二进制；
  * 开发态虚拟环境路径也按平台区分（Scripts/python.exe vs bin/python3）。 */
 const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron')
 const { spawn, exec } = require('child_process')
@@ -43,7 +43,7 @@ function startBackend() {
     if (app.isPackaged) {
       const dir = path.join(process.resourcesPath, 'backend')
       // PyInstaller 产物：Windows 带 .exe，macOS/Linux 无扩展名
-      exe = path.join(dir, IS_WIN ? 'photolab-server.exe' : 'photolab-server')
+      exe = path.join(dir, IS_WIN ? 'fernlens-server.exe' : 'fernlens-server')
       args = []
       cwd = dir
     } else {
@@ -61,7 +61,7 @@ function startBackend() {
     const timer = setTimeout(() => reject(new Error('后端启动超时')), 30000)
     child.stdout.on('data', (chunk) => {
       buf += chunk.toString()
-      const m = buf.match(/PHOTOLAB_SERVER_READY (http:\/\/127\.0\.0\.1:(\d+))(?: token=(\S+))?/)
+      const m = buf.match(/FERNLENS_SERVER_READY (http:\/\/127\.0\.0\.1:(\d+))(?: token=(\S+))?/)
       if (m) {
         clearTimeout(timer)
         resolve({ url: m[1], token: m[3] || '', child })
@@ -71,7 +71,7 @@ function startBackend() {
     child.on('exit', (code) => {
       backend = null
       if (!quitting && mainWindow) {
-        dialog.showErrorBox('PhotoLab', `渲染服务异常退出（code=${code}），应用将关闭。`)
+        dialog.showErrorBox('FernLens', `渲染服务异常退出（code=${code}），应用将关闭。`)
         app.quit()
       }
     })
@@ -86,7 +86,7 @@ function createWindow(url, token) {
     minWidth: 1100,
     minHeight: 700,
     backgroundColor: '#101014',
-    title: 'PhotoLab',
+    title: 'FernLens',
     icon: fs.existsSync(path.join(__dirname, '..', 'build', 'icon.png'))
       ? path.join(__dirname, '..', 'build', 'icon.png')
       : undefined,
@@ -112,15 +112,15 @@ function applyMenu() {
   }
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
-      label: 'PhotoLab',
+      label: 'FernLens',
       submenu: [
-        { role: 'about', label: '关于 PhotoLab' },
+        { role: 'about', label: '关于 FernLens' },
         { type: 'separator' },
-        { role: 'hide', label: '隐藏 PhotoLab' },
+        { role: 'hide', label: '隐藏 FernLens' },
         { role: 'hideOthers', label: '隐藏其他' },
         { role: 'unhide', label: '全部显示' },
         { type: 'separator' },
-        { role: 'quit', label: '退出 PhotoLab' },
+        { role: 'quit', label: '退出 FernLens' },
       ],
     },
     {
@@ -172,7 +172,7 @@ if (!gotLock) {
       lastToken = token
       mainWindow = createWindow(url, token)
     } catch (err) {
-      dialog.showErrorBox('PhotoLab', '渲染服务启动失败：\n' + (err?.message || err))
+      dialog.showErrorBox('FernLens', '渲染服务启动失败：\n' + (err?.message || err))
       app.quit()
     }
 
@@ -214,7 +214,7 @@ ipcMain.handle('open-image-dialog', async () => {
 ipcMain.handle('save-image-dialog', async (_ev, { defaultName }) => {
   const r = await dialog.showSaveDialog(mainWindow, {
     title: '保存图像',
-    defaultPath: defaultName || 'photolab.png',
+    defaultPath: defaultName || 'fernlens.png',
     filters: [
       { name: 'PNG', extensions: ['png'] },
       { name: 'JPEG', extensions: ['jpg'] },

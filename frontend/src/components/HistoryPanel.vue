@@ -4,6 +4,7 @@
  *  回退后再调整会从该步开新分支（丢弃其后的步骤，与 LR 一致）。 */
 import { nextTick, ref, watch } from 'vue'
 import Icon from '@/components/Icon'
+import { t, tx } from '@/lib/i18n'
 import {
   useEditor, jumpToHistory, undoHistory, redoHistory, clearHistory,
 } from '@/stores/editor'
@@ -41,20 +42,20 @@ watch(() => store.currentImageId, () => { void scrollToCurrent() })
   <div class="history-panel">
     <div class="bar">
       <span class="pos">
-        第 <b>{{ store.historyIndex + 1 }}</b> / {{ store.history.length }} 步
+        <b>{{ store.historyIndex + 1 }}</b> / {{ store.history.length }}
       </span>
-      <button class="mini" :disabled="!canUndo()" title="上一步（Ctrl+Z）" @click="undoHistory()">
-        <Icon name="rotateL" :size="11" /> 撤销
+      <button class="mini" :disabled="!canUndo()" :title="t('app.undoTip')" @click="undoHistory()">
+        <Icon name="rotateL" :size="11" /> {{ t('history.undo') }}
       </button>
-      <button class="mini" :disabled="!canRedo()" title="下一步（Ctrl+Shift+Z）" @click="redoHistory()">
-        <Icon name="rotateR" :size="11" /> 重做
+      <button class="mini" :disabled="!canRedo()" :title="t('app.redoTip')" @click="redoHistory()">
+        <Icon name="rotateR" :size="11" /> {{ t('history.redo') }}
       </button>
-      <button class="mini" :disabled="store.history.length <= 1" title="清空历史，只保留当前状态"
-              @click="clearHistory()">清空</button>
+      <button class="mini" :disabled="store.history.length <= 1" :title="t('history.clear')"
+              @click="clearHistory()">{{ t('history.clear') }}</button>
     </div>
 
     <div v-if="!store.history.length" class="empty">
-      还没有历史。每次调整完成后会自动记一步，可点任意一步整体回退。
+      {{ t('history.empty') }}
     </div>
 
     <div v-else ref="listEl" class="list">
@@ -64,7 +65,7 @@ watch(() => store.currentImageId, () => { void scrollToCurrent() })
         class="row"
         :data-step="i"
         :class="{ on: i === store.historyIndex, future: i > store.historyIndex }"
-        :title="`回到第 ${i + 1} 步：${h.label}`"
+        :title="`#${i + 1}: ${h.label}`"
         @click="jumpToHistory(i)"
       >
         <span class="idx">{{ i + 1 }}</span>
@@ -74,7 +75,7 @@ watch(() => store.currentImageId, () => { void scrollToCurrent() })
     </div>
 
     <p class="tip">
-      点任意一步可整体回到该状态；回退后再调整会从该步继续（其后的步骤被丢弃）。
+      {{ tx('点任意一步可整体回到该状态；回退后再调整会从该步继续。', 'Click any step to revert all adjustments; further edits branch from there.') }}
     </p>
   </div>
 </template>
@@ -88,7 +89,7 @@ watch(() => store.currentImageId, () => { void scrollToCurrent() })
 .empty {
   padding: 12px;
   border-radius: var(--r-2);
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--surface-1);
   font-size: 11px;
   line-height: 1.65;
   color: var(--text-3);
@@ -101,7 +102,7 @@ watch(() => store.currentImageId, () => { void scrollToCurrent() })
   overflow-y: auto;
   padding-right: 2px;
   border-radius: var(--r-2);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-1);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .row {
@@ -119,8 +120,8 @@ watch(() => store.currentImageId, () => { void scrollToCurrent() })
   cursor: pointer;
   transition: background 0.12s var(--ease), color 0.12s var(--ease);
 }
-.row:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
-.row.on { background: rgba(224, 161, 99, 0.14); color: var(--text); }
+.row:hover { background: var(--surface-hover); color: var(--text); }
+.row.on { background: var(--accent-soft); color: var(--text); }
 .row.on .idx { color: var(--accent-text); }
 .row.future { opacity: 0.42; }
 .idx {

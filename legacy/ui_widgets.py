@@ -1,4 +1,4 @@
-"""PhotoLab UI：主题、通用控件与后台处理线程。
+"""FernLens UI：主题、通用控件与后台处理线程。
 
 内容分区：
   1. 深色主题  2. 滑块行  3. 可折叠分区  4. 图像预览
@@ -1495,7 +1495,7 @@ PREVIEW = "preview"
 FULL = "full"
 
 # 供无界面测试使用：同步执行
-SYNC_MODE = os.environ.get("PHOTOLAB_SYNC") == "1"
+SYNC_MODE = (os.environ.get("FERNLENS_SYNC") or os.environ.get("PHOTOLAB_SYNC")) == "1"
 
 
 class ProcessorThread(QThread):

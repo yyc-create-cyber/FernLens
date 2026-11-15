@@ -1,18 +1,18 @@
-"""PhotoLab 本地服务端：把 core.py 的处理流水线暴露为 HTTP / WebSocket API。
+"""FernLens 本地服务端：把 core.py 的处理流水线暴露为 HTTP / WebSocket API。
 
-架构（见 PhotoLab-Web化改造方案.md §4）：
+架构：
 - 参数即文档：完整 Adjustments JSON 随每次渲染请求由客户端发来，服务端对参数无状态；
   服务端只持有文档像素状态（源图 / 仿制图章工作副本 / 数据版本号）。
 - REST 负责一切"变更"（打开/保存/图章/几何/自动调色），WebSocket 只回传渲染帧。
 - 帧协议（二进制）：[uint32 BE rid][uint8 kind 0=preview 1=full][JPEG bytes]。
 - 任务循环逐字复刻 ui_widgets.ProcessorThread 的语义：
   普通任务最新覆盖、urgent（保存）独立槽位、线性光缓存按（数据源, 版本号）失效、
-  协作取消只在停服时触发。PHOTOLAB_SYNC=1 时在提交线程内同步执行（测试用）。
+  协作取消只在停服时触发。FERNLENS_SYNC=1 时在提交线程内同步执行（测试用）。
 - 请求 id（rid）由客户端生成并随任务透传回帧头，客户端按 rid 丢弃过期帧；
   保存另用服务端自增的 save id 关联渲染结果与目标路径。
 
 启动：python server.py [--port N] [--token XXX] [--no-auth]
-就绪后向 stdout 打印一行：PHOTOLAB_SERVER_READY http://127.0.0.1:<port> token=<token>
+就绪后向 stdout 打印一行：FERNLENS_SERVER_READY http://127.0.0.1:<port> token=<token>
 """
 from __future__ import annotations
 
@@ -32,17 +32,18 @@ from typing import Callable
 
 import cv2
 import numpy as np
-from fastapi import (Depends, FastAPI, File, Header, HTTPException, Query,
+from fastapi import (Depends, FastAPI, File, Form, Header, HTTPException, Query,
                      UploadFile, WebSocket, WebSocketDisconnect)
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from core import (Adjustments, CancelledError, GRADING_RANGES, HIST_BINS,
                   MaskAdjustments, MaskState, PickerState, WheelState,
-                  copy_patch, crop_rotate, downscale_max_edge, hue_degrees,
+                  apply_depth_of_field, copy_patch, crop_rotate,
+                  depth_focus_preview, downscale_max_edge, hue_degrees,
                   linear_histograms, norm_rect_px, process_linear,
                   remap_mask_geometry, remap_masks_rot90, rgb8_to_linear_mt,
-                  rotate90, sample_patch)
+                  rotate90, sample_patch, stamp_brush)
 import core
 import auto
 import segment
@@ -65,7 +66,7 @@ RAW_EXTENSIONS = (".dng", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf"
 
 PREVIEW = "preview"
 FULL = "full"
-SYNC_MODE = os.environ.get("PHOTOLAB_SYNC") == "1"
+SYNC_MODE = (os.environ.get("FERNLENS_SYNC") or os.environ.get("PHOTOLAB_SYNC")) == "1"
 _FRAME_JPEG_QUALITY = 90
 
 
@@ -153,6 +154,8 @@ def _mask_from_dict(raw) -> MaskState:
     m.strokes = [[(float(p[0]), float(p[1])) for p in stroke
                   if isinstance(p, (list, tuple)) and len(p) == 2]
                  for stroke in (raw.get("strokes") or [])]
+    m.points = [(float(p[0]), float(p[1])) for p in (raw.get("points") or [])
+                if isinstance(p, (list, tuple)) and len(p) == 2]
     # AI 蒙版：本地像素掩码（base64 PNG）；旧文档里的网格（'0'/'1' 字符串）仍可读
     if m.kind == "ai":
         try:
@@ -224,6 +227,11 @@ class Document:
         self.retouch_preview: np.ndarray | None = None
         self.clone_ops: list = []                   # [(src_rect_norm, dst_rect_norm, feather_pct)]
         self.stamp_src_rect: tuple | None = None
+        self.dof_params: dict | None = None         # {focus, aperture, dof_range, bokeh_highlight}
+        self.dof_full: np.ndarray | None = None
+        self.dof_preview: np.ndarray | None = None
+        self._dof_depth_full: np.ndarray | None = None
+        self._dof_depth_preview: np.ndarray | None = None
         self.serial = 0                             # 数据版本号，随像素修改自增
 
     # ---- 打开 ----
@@ -276,14 +284,23 @@ class Document:
             arr = np.stack([arr] * 3, axis=-1)
         return arr
 
+    def _clear_dof_state(self, drop_depth: bool = True):
+        self.dof_params = None
+        self.dof_full = None
+        self.dof_preview = None
+        if drop_depth:
+            self._dof_depth_full = None
+            self._dof_depth_preview = None
+
     def _set_source_array(self, rgb: np.ndarray):
         self.source = np.ascontiguousarray(rgb)
         self.preview_src = downscale_max_edge(self.source, 1200)
-        # 新图像：丢弃图章修改（与 ui_window.load_image 一致）
+        # 新图像：丢弃图章与景深修改（与 ui_window.load_image 一致）
         self.retouch_full = None
         self.retouch_preview = None
         self.clone_ops.clear()
         self.stamp_src_rect = None
+        self._clear_dof_state(drop_depth=True)
         self.serial += 1
 
     @staticmethod
@@ -307,28 +324,82 @@ class Document:
             arr = np.stack([arr] * 3, axis=-1)
         return arr
 
-    # ---- 图章（对照 ui_window._on_clone_apply / _replay_stamps / _clear_stamps）----
+    # ---- 图章与 AI 景深虚化（图章/景深均作用于渲染流水线之前的基底像素）----
+    @property
+    def _base_full(self) -> np.ndarray | None:
+        return self.retouch_full if self.retouch_full is not None else self.source
+
+    @property
+    def _base_preview(self) -> np.ndarray | None:
+        return self.retouch_preview if self.retouch_preview is not None else self.preview_src
+
+    @property
+    def active_full(self) -> np.ndarray | None:
+        if self.dof_full is not None:
+            return self.dof_full
+        return self._base_full
+
+    @property
+    def active_preview(self) -> np.ndarray | None:
+        if self.dof_preview is not None:
+            return self.dof_preview
+        return self._base_preview
+
     def _ensure_retouch(self):
         if self.retouch_full is None:
             self.retouch_full = self.source.copy()
             self.retouch_preview = (self.preview_src.copy()
                                     if self.preview_src is not None else None)
 
+    def _run_clone_op(self, op) -> None:
+        if len(op) == 3:
+            src_r, dst_r, feather_pct = op
+            fe = float(np.clip(feather_pct, 0.0, 100.0)) / 100.0
+            h, w = self.retouch_full.shape[:2]
+            copy_patch(self.retouch_full, norm_rect_px(src_r, h, w),
+                       norm_rect_px(dst_r, h, w), fe)
+            if self.retouch_preview is not None:
+                ph, pw = self.retouch_preview.shape[:2]
+                copy_patch(self.retouch_preview, norm_rect_px(src_r, ph, pw),
+                           norm_rect_px(dst_r, ph, pw), fe)
+            return
+        _, src_start, pts, radius_norm, feather_pct, opacity_pct = op
+        fe = float(np.clip(feather_pct, 0.0, 100.0)) / 100.0
+        opp = float(np.clip(opacity_pct, 0.0, 100.0)) / 100.0
+        stamp_brush(self.retouch_full, src_start, pts, radius_norm, fe, opp)
+        if self.retouch_preview is not None:
+            stamp_brush(self.retouch_preview, src_start, pts, radius_norm, fe, opp)
+
     def apply_stamp(self, src_rect, dst_rect, feather_pct: float) -> int:
         if self.source is None:
             raise RuntimeError("未打开图像")
         self._ensure_retouch()
-        feather = float(np.clip(feather_pct, 0.0, 100.0)) / 100.0
         src_r = tuple(float(v) for v in src_rect)
         dst_r = tuple(float(v) for v in dst_rect)
-        h, w = self.retouch_full.shape[:2]
-        copy_patch(self.retouch_full, norm_rect_px(src_r, h, w),
-                   norm_rect_px(dst_r, h, w), feather)
-        if self.retouch_preview is not None:
-            ph, pw = self.retouch_preview.shape[:2]
-            copy_patch(self.retouch_preview, norm_rect_px(src_r, ph, pw),
-                       norm_rect_px(dst_r, ph, pw), feather)
-        self.clone_ops.append((src_r, dst_r, float(feather_pct)))
+        op = (src_r, dst_r, float(feather_pct))
+        self._run_clone_op(op)
+        self.clone_ops.append(op)
+        if self.dof_params is not None:
+            self._render_dof()
+        self.serial += 1
+        return self.serial
+
+    def apply_stamp_brush(self, src_start, points, radius_norm: float,
+                          feather_pct: float, opacity_pct: float = 100.0) -> int:
+        if self.source is None:
+            raise RuntimeError("未打开图像")
+        if not points or len(src_start) < 2:
+            raise RuntimeError("图章笔迹参数无效")
+        self._ensure_retouch()
+        src_pt = (float(src_start[0]), float(src_start[1]))
+        pts = [(float(p[0]), float(p[1])) for p in points if len(p) >= 2]
+        if not pts:
+            raise RuntimeError("图章笔迹为空")
+        op = ("brush", src_pt, pts, float(radius_norm), float(feather_pct), float(opacity_pct))
+        self._run_clone_op(op)
+        self.clone_ops.append(op)
+        if self.dof_params is not None:
+            self._render_dof()
         self.serial += 1
         return self.serial
 
@@ -338,15 +409,10 @@ class Document:
         self.retouch_preview = None
         if self.clone_ops and self.source is not None:
             self._ensure_retouch()
-            for src_r, dst_r, feather_pct in self.clone_ops:
-                fe = float(np.clip(feather_pct, 0.0, 100.0)) / 100.0
-                h, w = self.retouch_full.shape[:2]
-                copy_patch(self.retouch_full, norm_rect_px(src_r, h, w),
-                           norm_rect_px(dst_r, h, w), fe)
-                if self.retouch_preview is not None:
-                    ph, pw = self.retouch_preview.shape[:2]
-                    copy_patch(self.retouch_preview, norm_rect_px(src_r, ph, pw),
-                               norm_rect_px(dst_r, ph, pw), fe)
+            for op in self.clone_ops:
+                self._run_clone_op(op)
+        if self.dof_params is not None and self.source is not None:
+            self._render_dof()
         self.serial += 1
         return self.serial
 
@@ -368,17 +434,121 @@ class Document:
         self.stamp_src_rect = None
         return had
 
+    # ---- AI 调节景深（基于 HuggingFace Depth Anything V2 深度估计）----
+    def _ensure_dof_depth(self) -> tuple:
+        if self.source is None:
+            raise RuntimeError("未打开图像")
+        if self._dof_depth_full is None:
+            base = self._base_full
+            self._dof_depth_full = segment.estimate_depth(base)
+            pv = self._base_preview
+            if pv is not None:
+                ph, pw = pv.shape[:2]
+                if (ph, pw) == self._dof_depth_full.shape[:2]:
+                    self._dof_depth_preview = self._dof_depth_full
+                else:
+                    self._dof_depth_preview = cv2.resize(
+                        self._dof_depth_full, (pw, ph), interpolation=cv2.INTER_LINEAR)
+            else:
+                self._dof_depth_preview = None
+        return self._dof_depth_full, self._dof_depth_preview
+
+    def _render_dof(self) -> None:
+        if self.dof_params is None:
+            self.dof_full = None
+            self.dof_preview = None
+            return
+        d_full, d_prev = self._ensure_dof_depth()
+        p = self.dof_params
+        if float(p["aperture"]) <= 0.5:
+            self.dof_full = None
+            self.dof_preview = None
+            return
+        base_full = self._base_full
+        base_prev = self._base_preview
+        self.dof_full = apply_depth_of_field(
+            base_full, d_full,
+            focus=p["focus"], aperture=p["aperture"],
+            dof_range=p["dof_range"], bokeh_highlight=p["bokeh_highlight"],
+        )
+        if base_prev is not None and d_prev is not None:
+            self.dof_preview = apply_depth_of_field(
+                base_prev, d_prev,
+                focus=p["focus"], aperture=p["aperture"],
+                dof_range=p["dof_range"], bokeh_highlight=p["bokeh_highlight"],
+            )
+        else:
+            self.dof_preview = None
+
+    def pick_dof_focus(self, nx: float, ny: float, dof_range: float = 20.0) -> dict:
+        d_full, d_prev = self._ensure_dof_depth()
+        h, w = d_full.shape[:2]
+        cx = int(np.clip(round(float(nx) * max(w - 1, 1)), 0, w - 1))
+        cy = int(np.clip(round(float(ny) * max(h - 1, 1)), 0, h - 1))
+        x0, x1 = max(0, cx - 2), min(w, cx + 3)
+        y0, y1 = max(0, cy - 2), min(h, cy + 3)
+        focus = float(np.median(d_full[y0:y1, x0:x1]))
+        vis_d = d_prev if d_prev is not None else d_full
+        return {
+            "focus": round(focus, 4),
+            "depth_preview_png": depth_focus_preview(vis_d, focus, dof_range),
+        }
+
+    def apply_dof(self, focus: float, aperture: float, dof_range: float = 20.0,
+                  bokeh_highlight: float = 25.0) -> dict:
+        d_full, d_prev = self._ensure_dof_depth()
+        fc = float(np.clip(focus, 0.0, 1.0))
+        ap = float(np.clip(aperture, 0.0, 100.0))
+        dr = float(np.clip(dof_range, 0.0, 80.0))
+        bh = float(np.clip(bokeh_highlight, 0.0, 100.0))
+        vis_d = d_prev if d_prev is not None else d_full
+        preview_png = depth_focus_preview(vis_d, fc, dr)
+        if ap <= 0.5:
+            self._clear_dof_state(drop_depth=False)
+            self.serial += 1
+            return {
+                "serial": self.serial,
+                "active": False,
+                "focus": fc,
+                "aperture": 0.0,
+                "dof_range": dr,
+                "bokeh_highlight": bh,
+                "depth_preview_png": preview_png,
+            }
+        self.dof_params = {
+            "focus": fc,
+            "aperture": ap,
+            "dof_range": dr,
+            "bokeh_highlight": bh,
+        }
+        self._render_dof()
+        self.serial += 1
+        return {
+            "serial": self.serial,
+            "active": True,
+            **self.dof_params,
+            "depth_preview_png": preview_png,
+        }
+
+    def clear_dof(self) -> int:
+        had = self.dof_full is not None or self.dof_params is not None
+        self._clear_dof_state(drop_depth=False)
+        if had:
+            self.serial += 1
+        return self.serial
+
     # ---- 几何变换（对照 ui_window._apply_crop / _rotate90 / _commit_geometry）----
     def _commit_geometry(self, new_source: np.ndarray):
         self.source = np.ascontiguousarray(new_source)
         self.preview_src = downscale_max_edge(self.source, 1200)
+        self._clear_dof_state(drop_depth=True)
         self.serial += 1
 
     def crop(self, rect_norm, angle_deg: float, masks) -> tuple:
         """rect_norm=(x0,y0,x1,y1) 归一化。返回 (new_masks, baked)。"""
         if self.source is None:
             raise RuntimeError("未打开图像")
-        base = self.retouch_full if self.retouch_full is not None else self.source
+        base = self.active_full
         rect_t = (float(rect_norm[0]), float(rect_norm[1]),
                   float(rect_norm[2]), float(rect_norm[3]))
         if abs(angle_deg) < 1e-9 and rect_t == (0.0, 0.0, 1.0, 1.0):
@@ -396,7 +566,7 @@ class Document:
     def rotate(self, clockwise: bool, masks) -> tuple:
         if self.source is None:
             raise RuntimeError("未打开图像")
-        base = self.retouch_full if self.retouch_full is not None else self.source
+        base = self.active_full
         k = 3 if clockwise else 1
         new_src = rotate90(base, k)
         remap_masks_rot90(masks, k, base.shape[:2])
@@ -406,7 +576,7 @@ class Document:
 
     # ---- 派生数据 ----
     def image_at(self, x: int, y: int, patch: int = 5) -> dict:
-        src = self.retouch_full if self.retouch_full is not None else self.source
+        src = self.active_full
         color = sample_patch(src, int(x), int(y), patch)
         return {"r": float(color[0]), "g": float(color[1]), "b": float(color[2]),
                 "hue": float(hue_degrees(tuple(float(c) for c in color)))}
@@ -465,7 +635,7 @@ class RenderLoop(threading.Thread):
     （未指定则为内部自增 id）；客户端据此丢弃过期帧。"""
 
     def __init__(self, on_frame: Callable, on_busy: Callable, on_error: Callable):
-        super().__init__(daemon=True, name="photolab-render")
+        super().__init__(daemon=True, name="fernlens-render")
         self.on_frame = on_frame
         self.on_busy = on_busy
         self.on_error = on_error
@@ -600,7 +770,7 @@ class RenderLoop(threading.Thread):
 # ======================================================================
 # 4. FastAPI 应用
 # ======================================================================
-app = FastAPI(title="PhotoLab Server", docs_url=None, redoc_url=None)
+app = FastAPI(title="FernLens Server", docs_url=None, redoc_url=None)
 
 _state_lock = threading.Lock()
 library = Library()                     # 多图图库；打开一律入列并选中
@@ -633,9 +803,9 @@ def _add_and_select(d: Document) -> int:
 
 # ------------------------------------------------------------ 鉴权
 async def _auth(token: str = Query(default=""),
-                x_photolab_token: str = Header(default="")):
+                x_fernlens_token: str = Header(default="")):
     if _token and not secrets.compare_digest(token or "", _token) \
-            and not secrets.compare_digest(x_photolab_token or "", _token):
+            and not secrets.compare_digest(x_fernlens_token or "", _token):
         raise HTTPException(status_code=401, detail="bad token")
 
 
@@ -678,8 +848,8 @@ def _broadcast_frame(arr: np.ndarray, rid: int, is_full: bool):
 
 def _sync_sources():
     """把文档当前像素状态同步给渲染循环（两个数据源都换）。"""
-    loop.set_source(PREVIEW, doc.preview_src)
-    loop.set_source(FULL, doc.source)
+    loop.set_source(PREVIEW, doc.active_preview)
+    loop.set_source(FULL, doc.active_full)
 
 
 def _on_frame(arr, rid, is_full):
@@ -749,6 +919,34 @@ class StampReq(BaseModel):
     feather: float = 20.0         # 0..100
 
 
+class StampBrushReq(BaseModel):
+    src_start: list               # 归一化 [sx, sy]
+    points: list                  # 归一化 [[x, y], ...]
+    radius: float = 0.04          # 相对图像短边半径
+    feather: float = 35.0         # 0..100
+    opacity: float = 100.0        # 0..100
+
+
+class DepthRelightReq(BaseModel):
+    preset: str = "studio"        # studio | atmosphere | warm_cool | cinematic
+    strength: float = 1.0         # 0..1.5
+    near_bias: float = 0.0        # -0.35..0.35
+    masks_only: bool = False
+
+
+class DepthDofPickReq(BaseModel):
+    x: float                      # 归一化 0..1
+    y: float
+    dof_range: float = 20.0
+
+
+class DepthDofReq(BaseModel):
+    focus: float = 0.75           # 对焦深度 0..1（1=最近，0=最远）
+    aperture: float = 45.0        # 光圈虚化强度 0..100
+    dof_range: float = 20.0       # 清晰景深宽度 0..80
+    bokeh_highlight: float = 25.0 # 焦外高光散景增强 0..100
+
+
 class CropReq(BaseModel):
     rect: list                    # 归一化 (x0, y0, x1, y1)
     angle: float = 0.0
@@ -790,11 +988,12 @@ class AiMaskReq(BaseModel):
 @app.get("/api/meta")
 def api_meta(_=Depends(_auth)):
     src = doc.source
-    return {"app": "PhotoLab", "version": "1.0.0-web",
+    return {"app": "FernLens", "version": "1.0.0-web",
             "rawpy": rawpy is not None, "gpu": _HAS_PYOPENCL,
             "width": int(src.shape[1]) if src is not None else 0,
             "height": int(src.shape[0]) if src is not None else 0,
-            "hist_bins": HIST_BINS, "preview_max_edge": 1200}
+            "hist_bins": HIST_BINS, "preview_max_edge": 1200,
+            "dof": doc.dof_params}
 
 
 @app.get("/api/defaults")
@@ -848,7 +1047,7 @@ def api_render(req: RenderReq, _=Depends(_auth)):
     if ext is None:
         raise HTTPException(status_code=400, detail=f"不支持的格式：{fmt}")
     with _state_lock:
-        src = np.array(doc.source, copy=True)     # 快照，渲染期间允许换图
+        src = np.array(doc.active_full, copy=True)     # 快照，渲染期间允许换图
     try:
         params = adjustments_from_dict(req.adjustments)
         out = process_linear(params, rgb8_to_linear_mt(src))
@@ -885,6 +1084,18 @@ def api_stamp(req: StampReq, _=Depends(_auth)):
     try:
         with _state_lock:
             serial = doc.apply_stamp(req.src_rect, req.dst_rect, req.feather)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _sync_sources()
+    return {"serial": serial}
+
+
+@app.post("/api/stamp/brush")
+def api_stamp_brush(req: StampBrushReq, _=Depends(_auth)):
+    try:
+        with _state_lock:
+            serial = doc.apply_stamp_brush(
+                req.src_start, req.points, req.radius, req.feather, req.opacity)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     _sync_sources()
@@ -966,7 +1177,7 @@ def api_library_select(req: SelectReq, _=Depends(_auth)):
     _sync_sources()
     h, w = doc.source.shape[:2]
     return {"id": req.id, "name": doc.name, "width": int(w), "height": int(h),
-            "serial": doc.serial}
+            "serial": doc.serial, "dof": doc.dof_params}
 
 
 @app.post("/api/library/remove")
@@ -995,7 +1206,7 @@ def api_library_thumb(image_id: int, _=Depends(_auth)):
     e = library.get(image_id)
     if e is None or e["doc"].source is None:
         raise HTTPException(status_code=404, detail="图像不在图库中")
-    small = downscale_max_edge(e["doc"].source, 240)
+    small = downscale_max_edge(e["doc"].active_full, 240)
     ok, buf = cv2.imencode(".jpg", cv2.cvtColor(small, cv2.COLOR_RGB2BGR),
                            [cv2.IMWRITE_JPEG_QUALITY, 82])
     if not ok:
@@ -1106,6 +1317,104 @@ def api_ai_models_progress(_=Depends(_auth)):
     return segment.download_progress()
 
 
+@app.post("/api/ai/depth-relight")
+def api_ai_depth_relight(req: DepthRelightReq, _=Depends(_auth)):
+    """AI 景深立体调色：本地 Depth Anything V2 深度图 -> 前景/远景非破坏性蒙版与调色。"""
+    if doc.source is None:
+        raise HTTPException(status_code=400, detail="未打开图像")
+    with _state_lock:
+        src = np.array(doc.active_full, copy=True)
+    try:
+        return auto.suggest_depth_relight(
+            src, preset=req.preset, strength=req.strength,
+            near_bias=req.near_bias, masks_only=req.masks_only)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.post("/api/ai/dof/pick")
+def api_ai_dof_pick(req: DepthDofPickReq, _=Depends(_auth)):
+    """AI 景深对焦取点：按画布归一化坐标采样 Depth Anything V2 深度与焦平面预览。"""
+    if doc.source is None:
+        raise HTTPException(status_code=400, detail="未打开图像")
+    try:
+        with _state_lock:
+            return doc.pick_dof_focus(req.x, req.y, dof_range=req.dof_range)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.post("/api/ai/dof")
+def api_ai_dof(req: DepthDofReq, _=Depends(_auth)):
+    """AI 调节景深：本地 Depth Anything V2 深度估计 + 光学景深散景渲染。"""
+    if doc.source is None:
+        raise HTTPException(status_code=400, detail="未打开图像")
+    try:
+        with _state_lock:
+            res = doc.apply_dof(
+                req.focus, req.aperture,
+                dof_range=req.dof_range,
+                bokeh_highlight=req.bokeh_highlight,
+            )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=str(exc))
+    _sync_sources()
+    return res
+
+
+@app.post("/api/ai/dof/clear")
+def api_ai_dof_clear(_=Depends(_auth)):
+    """清除 AI 景深虚化，恢复原始清晰图像。"""
+    with _state_lock:
+        serial = doc.clear_dof()
+    _sync_sources()
+    return {"serial": serial, "active": False}
+
+
+@app.post("/api/ai/color-match")
+async def api_ai_color_match(
+    file: UploadFile | None = File(default=None),
+    ref_id: int | None = Form(default=None),
+    strength: float = Form(default=0.75),
+    protect_subject: bool = Form(default=False),
+    _=Depends(_auth),
+):
+    """AI 参考仿色：从上传参考图或图库参考图提取影调与色彩风格参数。"""
+    if doc.source is None:
+        raise HTTPException(status_code=400, detail="未打开图像")
+    with _state_lock:
+        src = np.array(doc.active_full, copy=True)
+        ref_arr = None
+        if ref_id is not None:
+            entry = library.get(ref_id)
+            if entry is None or entry["doc"].active_full is None:
+                raise HTTPException(status_code=400, detail="参考图像不在图库中")
+            ref_arr = np.array(entry["doc"].active_full, copy=True)
+    if ref_arr is None:
+        if file is None:
+            raise HTTPException(status_code=400, detail="请上传参考图像或选择图库中的图像")
+        data = await file.read()
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=400, detail="无法解码参考图像")
+        ref_arr = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    try:
+        return auto.match_reference_color(
+            src, ref_arr, strength=strength, protect_subject=protect_subject)
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/histogram")
 def api_histogram(_=Depends(_auth)):
     src = _last_frames.get(FULL)
@@ -1198,7 +1507,7 @@ async def _shutdown():
 
 def main():
     global _token, loop
-    parser = argparse.ArgumentParser(description="PhotoLab 本地服务端")
+    parser = argparse.ArgumentParser(description="FernLens 本地服务端")
     parser.add_argument("--port", type=int, default=0, help="监听端口（0=自动）")
     parser.add_argument("--token", default="", help="访问令牌（默认随机生成）")
     parser.add_argument("--no-auth", action="store_true", help="关闭令牌校验")
@@ -1209,7 +1518,7 @@ def main():
 
     import uvicorn
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    print(f"PHOTOLAB_SERVER_READY http://127.0.0.1:{port} token={_token}", flush=True)
+    print(f"FERNLENS_SERVER_READY http://127.0.0.1:{port} token={_token}", flush=True)
     uvicorn.Server(config).run()
 
 

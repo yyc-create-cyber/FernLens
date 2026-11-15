@@ -1,4 +1,4 @@
-"""PhotoLab 自动调色：规则版 + AI 版。
+"""FernLens 自动调色：规则版 + AI 版。
 
 - 「自动」：纯本地规则（灰世界白平衡 + 直方图自动色阶），瞬时、可预期；
 - 「AI 调色」：把压缩后的图像（最长边 1280、JPEG 90，过大再压）与统计数据
@@ -10,7 +10,7 @@ AI 蒙版不走这里：蒙版识别只保留本地像素级引擎（见 segment
 
 端点为任意 OpenAI 兼容 chat/completions 服务，配置解析顺序：
     1. 前端「AI 设置」界面传入的 {base_url, api_key, model}
-    2. 环境变量 PHOTOLAB_AI_BASE_URL / PHOTOLAB_AI_KEY / PHOTOLAB_AI_MODEL
+    2. 环境变量 FERNLENS_AI_BASE_URL / FERNLENS_AI_KEY / FERNLENS_AI_MODEL
 
 两个版本都只产出参数/网格数据，渲染仍由 core 流水线完成，便于统一钳制与撤销。
 """
@@ -131,16 +131,16 @@ def resolve_config(cfg: dict | None = None) -> tuple | None:
     """返回 (baseUrl, apiKey, model)；未配置返回 None。
 
     优先级：前端「AI 设置」传入的字典 > 环境变量
-    PHOTOLAB_AI_BASE_URL / PHOTOLAB_AI_KEY / PHOTOLAB_AI_MODEL。
+    FERNLENS_AI_BASE_URL / FERNLENS_AI_KEY / FERNLENS_AI_MODEL（兼容旧 PHOTOLAB_AI_*）。
     """
     c = cfg or {}
     base = str(c.get("base_url") or "").rstrip("/")
     key = str(c.get("api_key") or "")
     model = str(c.get("model") or "")
     if not (base and key and model):
-        base = os.environ.get("PHOTOLAB_AI_BASE_URL", "").rstrip("/")
-        key = os.environ.get("PHOTOLAB_AI_KEY", "")
-        model = os.environ.get("PHOTOLAB_AI_MODEL", "")
+        base = (os.environ.get("FERNLENS_AI_BASE_URL") or os.environ.get("PHOTOLAB_AI_BASE_URL", "")).rstrip("/")
+        key = os.environ.get("FERNLENS_AI_KEY") or os.environ.get("PHOTOLAB_AI_KEY", "")
+        model = os.environ.get("FERNLENS_AI_MODEL") or os.environ.get("PHOTOLAB_AI_MODEL", "")
     if base and key and model:
         return base, key, model
     return None
@@ -428,3 +428,239 @@ def suggest_ai(rgb8: np.ndarray, config: dict | None = None,
     if not params:
         raise RuntimeError(f"{model}: 返回参数为空")
     return params, note, f"{model}@{base}"
+
+
+# ======================================================================
+# 3. 本地 AI 景深立体调色（Depth Anything V2 Small ONNX）
+# ======================================================================
+
+_DEPTH_PRESETS = {
+    "studio": {
+        "near": {"exposure": 0.24, "temperature": 8.0, "clarity": 16.0, "highlights": 8.0, "vibrance": 8.0},
+        "far": {"exposure": -0.32, "temperature": -8.0, "contrast": -8.0, "dehaze": -10.0, "saturation": -10.0},
+    },
+    "atmosphere": {
+        "near": {"contrast": 10.0, "clarity": 15.0, "vibrance": 12.0, "exposure": 0.08},
+        "far": {"dehaze": -28.0, "blacks": 14.0, "exposure": 0.16, "temperature": -12.0, "saturation": -14.0},
+    },
+    "warm_cool": {
+        "near": {"temperature": 18.0, "highlights": 10.0, "saturation": 8.0, "exposure": 0.12},
+        "far": {"temperature": -22.0, "tint": -4.0, "exposure": -0.20, "shadows": -8.0},
+    },
+    "cinematic": {
+        "near": {"clarity": 14.0, "sharpen": 16.0, "exposure": 0.14, "contrast": 8.0},
+        "far": {"exposure": -0.46, "saturation": -18.0, "contrast": -12.0, "blacks": -6.0},
+    },
+}
+
+
+def suggest_depth_relight(rgb8: np.ndarray, preset: str = "studio",
+                          strength: float = 1.0, near_bias: float = 0.0,
+                          masks_only: bool = False) -> dict:
+    """使用本地 Depth Anything V2 模型生成前景/远景景深蒙版并附加非破坏性立体调色参数。"""
+    import segment
+
+    key = preset if preset in _DEPTH_PRESETS else "studio"
+    gain = float(np.clip(strength, 0.0, 1.5))
+    near_prob, far_prob, preview_b64, pw, ph = segment.depth_masks(rgb8, near_bias=near_bias)
+
+    def _encode_prob(prob: np.ndarray):
+        u8 = (np.clip(prob, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+        u8 = segment._resize_long_edge(u8, segment.MASK_LONG_EDGE)
+        return core.encode_mask_png(u8.astype(np.float32) / np.float32(255.0))
+
+    near_png, nw, nh = _encode_prob(near_prob)
+    far_png, fw, fh = _encode_prob(far_prob)
+
+    def _make_mask(name: str, ai_target: str, png: str, w: int, h: int, adj_map: dict) -> dict:
+        adj = {k: round(float(v) * gain, 2) for k, v in adj_map.items()} if not masks_only else {}
+        return {
+            "kind": "ai",
+            "name": name,
+            "enabled": True,
+            "invert": False,
+            "feather": 0,
+            "ai_target": ai_target,
+            "mask_png": png,
+            "mask_w": w,
+            "mask_h": h,
+            "adj": adj,
+        }
+
+    spec = _DEPTH_PRESETS[key]
+    masks = [
+        _make_mask(f"AI Depth Near ({key})", "depth_near", near_png, nw, nh, spec["near"]),
+        _make_mask(f"AI Depth Far ({key})", "depth_far", far_png, fw, fh, spec["far"]),
+    ]
+    return {
+        "preset": key,
+        "model": "local(Depth-Anything-V2-Small)",
+        "depth_preview_png": preview_b64,
+        "preview_w": pw,
+        "preview_h": ph,
+        "masks": masks,
+    }
+
+
+# ======================================================================
+# 4. AI 参考仿色（感知 Lab / 分位曲线 / 三阶色轮拟合）
+# ======================================================================
+
+def _extract_palette(rgb8: np.ndarray, k: int = 5) -> list:
+    """提取图像 k 个主色调 HEX 色板。"""
+    import cv2
+    small = core.downscale_max_edge(rgb8, 120)
+    pts = small.reshape(-1, 3).astype(np.float32)
+    if len(pts) < k:
+        return ["#808080"] * k
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 12, 1.0)
+    _, labels, centers = cv2.kmeans(pts, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+    counts = np.bincount(labels.flatten(), minlength=k)
+    order = np.argsort(-counts)
+    out = []
+    for idx in order:
+        r, g, b = [int(np.clip(round(c), 0, 255)) for c in centers[idx]]
+        out.append(f"#{r:02x}{g:02x}{b:02x}")
+    return out
+
+
+def match_reference_color(src_rgb8: np.ndarray, ref_rgb8: np.ndarray,
+                          strength: float = 0.75,
+                          protect_subject: bool = False) -> dict:
+    """根据参考图提取影调曲线、白平衡、对比度与高光/中间调/阴影色轮参数。
+
+    输出全部是 FernLens 原生可编辑参数（滑块 + RGB 曲线 + 颜色分级色轮），
+    支持历史撤销、微调与全分辨率无损导出。
+    """
+    import cv2
+
+    gain = float(np.clip(strength, 0.0, 1.0))
+    src_s = core.downscale_max_edge(src_rgb8, 320)
+    ref_s = core.downscale_max_edge(ref_rgb8, 320)
+
+    src_weights = None
+    if protect_subject:
+        try:
+            import segment
+            if segment.models_status().get("depth_anything_v2", {}).get("ready"):
+                depth = segment.estimate_depth(src_s)
+                # 保护高景深前景（降低前景在全局色彩统计里的权重偏移，留更多余量）
+                src_weights = np.clip(1.25 - depth * 0.65, 0.35, 1.0).astype(np.float32)
+        except Exception:
+            src_weights = None
+
+    src_lin = core.rgb8_to_linear(src_s)
+    ref_lin = core.rgb8_to_linear(ref_s)
+    src_lum = core.luminance(src_lin)
+    ref_lum = core.luminance(ref_lin)
+
+    src_srgb = core.to_srgb(src_lin)
+    ref_srgb = core.to_srgb(ref_lin)
+    src_lab = cv2.cvtColor(src_s, cv2.COLOR_RGB2LAB).astype(np.float32)
+    ref_lab = cv2.cvtColor(ref_s, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    # 1. 白平衡（中间调 Lab a/b 均值差 -> temperature / tint）
+    def _mid_ab(lab, lum):
+        mask = (lum > 0.12) & (lum < 0.85)
+        if int(mask.sum()) < 50:
+            mask = np.ones_like(lum, dtype=bool)
+        a_mean = float(lab[..., 1][mask].mean()) - 128.0
+        b_mean = float(lab[..., 2][mask].mean()) - 128.0
+        return a_mean, b_mean
+
+    sa, sb = _mid_ab(src_lab, src_lum)
+    ra, rb = _mid_ab(ref_lab, ref_lum)
+    wb_damp = 0.72 if src_weights is not None else 0.85
+    raw_temp = _clamp((rb - sb) * 2.1 * wb_damp, -55.0, 55.0)
+    raw_tint = _clamp((ra - sa) * 1.8 * wb_damp, -40.0, 40.0)
+
+    # 2. 曝光 / 对比度 / 黑白场（sRGB 亮度分位数）
+    src_y = (0.2126 * src_srgb[..., 0] + 0.7152 * src_srgb[..., 1] + 0.0722 * src_srgb[..., 2]).ravel()
+    ref_y = (0.2126 * ref_srgb[..., 0] + 0.7152 * ref_srgb[..., 1] + 0.0722 * ref_srgb[..., 2]).ravel()
+    sp05, sp25, sp50, sp75, sp95 = [float(v) for v in np.percentile(src_y, [5, 25, 50, 75, 95])]
+    rp05, rp25, rp50, rp75, rp95 = [float(v) for v in np.percentile(ref_y, [5, 25, 50, 75, 95])]
+
+    raw_exp = _clamp(math.log2(max(rp50, 0.04) / max(sp50, 0.04)) * 0.45, -1.1, 1.1)
+    src_spread = max(sp75 - sp25, 0.05)
+    ref_spread = max(rp75 - rp25, 0.05)
+    raw_contrast = _clamp((ref_spread - src_spread) * 115.0, -35.0, 40.0)
+    raw_blacks = _clamp((rp05 - sp05) * 180.0, -35.0, 40.0)
+    raw_whites = _clamp((rp95 - sp95) * 110.0, -35.0, 35.0)
+
+    # 3. 饱和度（Lab 色度均值比）
+    src_chroma = float(np.hypot(src_lab[..., 1] - 128.0, src_lab[..., 2] - 128.0).mean())
+    ref_chroma = float(np.hypot(ref_lab[..., 1] - 128.0, ref_lab[..., 2] - 128.0).mean())
+    sat_ratio = (ref_chroma - src_chroma) / max(src_chroma, 8.0)
+    raw_sat = _clamp(sat_ratio * 65.0 * (0.75 if protect_subject else 1.0), -45.0, 45.0)
+
+    # 4. 三阶颜色分级色轮（阴影 / 中间调 / 高光 Lab 色彩倾向差）
+    def _zone_wheel(z_lo: float, z_hi: float, sat_scale: float) -> dict:
+        sm = (src_y >= z_lo) & (src_y < z_hi)
+        rm = (ref_y >= z_lo) & (ref_y < z_hi)
+        if int(sm.sum()) < 30 or int(rm.sum()) < 30:
+            return {"hue": 0.0, "saturation": 0.0, "luminance": 0.0}
+        da = float((ref_lab[..., 1].ravel()[rm].mean() - 128.0) - (src_lab[..., 1].ravel()[sm].mean() - 128.0))
+        db = float((ref_lab[..., 2].ravel()[rm].mean() - 128.0) - (src_lab[..., 2].ravel()[sm].mean() - 128.0))
+        # 扣除已被全局白平衡吸收的偏色
+        da -= (ra - sa) * 0.55
+        db -= (rb - sb) * 0.55
+        mag = math.hypot(da, db)
+        if mag < 1.8:
+            return {"hue": 0.0, "saturation": 0.0, "luminance": 0.0}
+        # Lab (a=红绿, b=黄蓝) 映射到色轮角度 (0°红, 60°黄, 120°绿, 180°青, 240°蓝, 300°品红)
+        hue = (math.degrees(math.atan2(db, da)) * 0.9 + 360.0) % 360.0
+        # 校正 Lab b*(90°黄)->HSV 60°黄, -90°蓝->240°蓝 的近似映射
+        ang = math.degrees(math.atan2(db, da))
+        hue = (ang if ang >= 0 else ang + 360.0)
+        # Lab 0=红(0°), 90=黄(60°), 180=绿(120°), 270=蓝(240°)
+        if hue <= 90:
+            hue = hue * (60.0 / 90.0)
+        elif hue <= 180:
+            hue = 60.0 + (hue - 90.0) * (120.0 / 90.0)
+        elif hue <= 270:
+            hue = 180.0 + (hue - 180.0) * (60.0 / 90.0)
+        else:
+            hue = 240.0 + (hue - 270.0) * (120.0 / 90.0)
+        sat = _clamp(mag * sat_scale, 0.0, 38.0)
+        return {"hue": round(hue % 360.0, 1), "saturation": round(sat, 1), "luminance": 0.0}
+
+    wheels = {
+        "shadows": _zone_wheel(0.0, 0.28, 1.35),
+        "midtones": _zone_wheel(0.28, 0.68, 0.95),
+        "highlights": _zone_wheel(0.68, 1.01, 1.30),
+    }
+
+    # 5. RGB 分位曲线微调（捕获胶片暗部抬起与高光滚降特征）
+    qs = [0, 25, 50, 75, 100]
+    curves = {}
+    for ci, ch in enumerate(("red", "green", "blue")):
+        sq = np.percentile(src_srgb[..., ci], qs)
+        rq = np.percentile(ref_srgb[..., ci], qs)
+        pts = []
+        for idx, (sx_v, rx_v) in enumerate(zip(sq, rq)):
+            x = [0.0, 0.25, 0.5, 0.75, 1.0][idx]
+            # 仅取 40% 分位残差，避免与曝光/白平衡叠加过度
+            delta = float(np.clip((rx_v - sx_v) * 0.35, -0.14, 0.14))
+            y = float(np.clip(x + delta, 0.0, 1.0))
+            pts.append([round(x, 3), round(y, 3)])
+        curves[ch] = pts
+
+    raw_params = {
+        "temperature": raw_temp,
+        "tint": raw_tint,
+        "exposure": raw_exp,
+        "contrast": raw_contrast,
+        "blacks": raw_blacks,
+        "whites": raw_whites,
+        "saturation": raw_sat,
+        "curves": curves,
+        "wheels": wheels,
+    }
+    params = sanitize_ai_params(raw_params, strength=gain)
+    return {
+        "adjustments": params,
+        "ref_palette": _extract_palette(ref_s, 5),
+        "src_palette": _extract_palette(src_s, 5),
+        "protect_subject": bool(protect_subject),
+        "note": "AI Reference Color Match",
+    }

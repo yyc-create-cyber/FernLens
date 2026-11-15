@@ -12,10 +12,10 @@ const path = require('path')
 const { execFileSync } = require('child_process')
 
 const STRINGS = {
-  FileDescription: 'PhotoLab — 本地照片调色器（Electron 壳）',
-  ProductName: 'PhotoLab',
+  FileDescription: 'FernLens — 本地照片调色器（Electron 壳）',
+  ProductName: 'FernLens',
   LegalCopyright: 'Copyright © 2026 nothing1145141',
-  InternalName: 'PhotoLab',
+  InternalName: 'FernLens',
   CompanyName: 'nothing1145141',
 }
 
@@ -81,14 +81,14 @@ function viaResedit(exe, icon) {
 
 /* macOS：确保 sidecar 与 .app 内可执行文件带执行位 */
 function fixPosixModes(appOutDir) {
-  const backendDir = path.join(appOutDir, 'PhotoLab.app', 'Contents', 'Resources', 'backend')
-  const bin = path.join(backendDir, 'photolab-server')
+  const backendDir = path.join(appOutDir, 'FernLens.app', 'Contents', 'Resources', 'backend')
+  const bin = path.join(backendDir, 'fernlens-server')
   if (!fs.existsSync(bin)) {
     console.warn(`  · afterPack: 未找到 ${bin}，跳过 chmod`)
     return
   }
   fs.chmodSync(bin, 0o755)
-  console.log('  ✓ afterPack: chmod 755 photolab-server')
+  console.log('  ✓ afterPack: chmod 755 fernlens-server')
   // _internal 里的动态库按需补权限（PyInstaller 有时会给 .dylib 保留 644）
   const internal = path.join(backendDir, '_internal')
   if (fs.existsSync(internal)) {
@@ -112,7 +112,7 @@ exports.default = async function afterPack(context) {
   }
   if (context.electronPlatformName !== 'win32') return
 
-  const exe = path.join(context.appOutDir, 'PhotoLab.exe')
+  const exe = path.join(context.appOutDir, 'FernLens.exe')
   const icon = path.join(context.packager.projectDir, '..', 'build', 'icon.ico')
   if (!fs.existsSync(exe)) {
     console.warn(`  · afterPack: 未找到 ${exe}，跳过版本信息写入`)

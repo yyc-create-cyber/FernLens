@@ -10,6 +10,7 @@ import { notifyChanged, notifyCommitted } from '@/stores/editor'
 import { RANGE_LABELS } from '@/lib/presets'
 import { HINT } from '@/lib/hints'
 import { vTip } from '@/lib/tip'
+import { t, tx } from '@/lib/i18n'
 import type { AdjustmentsLike, GradingRange } from '@/api/types'
 import { GRADING_RANGES } from '@/api/types'
 
@@ -17,6 +18,10 @@ const props = defineProps<{ adj: AdjustmentsLike }>()
 
 const active = ref<GradingRange>('shadows')
 const activeWheel = computed(() => props.adj.wheels[active.value])
+
+function rangeLabel(r: GradingRange): string {
+  return tx(RANGE_LABELS[r], t(`grading.${r}` as any))
+}
 
 function onWheelChange(range: GradingRange, displayHue: number, displaySat: number): void {
   const w = props.adj.wheels[range]
@@ -43,24 +48,24 @@ function onWheelChange(range: GradingRange, displayHue: number, displaySat: numb
           @wheel-change="(h: number, s: number) => onWheelChange(range, h, s)"
           @released="notifyCommitted"
         />
-        <span v-tip="HINT.gradingEdge" class="caption">{{ RANGE_LABELS[range] }}</span>
+        <span v-tip="HINT.gradingEdge" class="caption">{{ rangeLabel(range) }}</span>
       </div>
     </div>
 
     <div class="params">
       <div class="params-head">
         <span class="p-dot" />
-        <span class="p-title">{{ RANGE_LABELS[active] }}</span>
+        <span class="p-title">{{ rangeLabel(active) }}</span>
         <span class="p-hue num">H {{ activeWheel.hue.toFixed(0) }}°</span>
       </div>
-      <SliderRow label="饱和度" :hint="HINT.gradingEdge" :min="-100" :max="100"
+      <SliderRow :label="t('grading.sat')" :hint="HINT.gradingEdge" :min="-100" :max="100"
                  v-model="activeWheel.saturation"
                  @input="notifyChanged" @release="notifyCommitted" />
-      <SliderRow label="亮度" :hint="'只改变该亮度区间的明暗：+ 让这部分更亮更前置，− 让它沉下去。不影响其它区间。'"
+      <SliderRow :label="t('grading.lum')" :hint="tx('只改变该亮度区间的明暗：+ 让这部分更亮更前置，− 让它沉下去。', 'Adjust luminance only within this tonal range.')"
                  :min="-100" :max="100"
                  v-model="activeWheel.luminance"
                  @input="notifyChanged" @release="notifyCommitted" />
-      <SliderRow label="混合" :hint="'控制各亮度区间之间的过渡软硬。0 硬切（界限分明，适合强风格），100 最大平滑（过渡自然）。'"
+      <SliderRow :label="t('grading.blend')" :hint="tx('控制各亮度区间之间的过渡软硬。', 'Balance blending smoothness between shadow/midtone/highlight wheels.')"
                  :min="0" :max="100" :default-value="50"
                  v-model="adj.blend"
                  @input="notifyChanged" @release="notifyCommitted" />
@@ -85,9 +90,9 @@ function onWheelChange(range: GradingRange, displayHue: number, displaySat: numb
   cursor: pointer;
   transition: background 0.16s var(--ease), box-shadow 0.16s var(--ease);
 }
-.cell:hover { background: rgba(255, 255, 255, 0.03); }
+.cell:hover { background: var(--surface-1); }
 .cell.active {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-2);
   box-shadow: inset 0 0 0 1px var(--line-2);
 }
 .cell :deep(canvas) { display: block; }
@@ -97,7 +102,7 @@ function onWheelChange(range: GradingRange, displayHue: number, displaySat: numb
   color: var(--text-3);
   user-select: none;
   cursor: help;
-  text-decoration: underline dotted rgba(255, 243, 228, 0.16);
+  text-decoration: underline dotted var(--line-2);
   text-underline-offset: 3px;
   transition: color 0.14s var(--ease);
 }

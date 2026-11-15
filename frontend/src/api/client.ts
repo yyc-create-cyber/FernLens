@@ -1,4 +1,4 @@
-/** REST + WebSocket 客户端。协议见 PhotoLab-Web化改造方案.md §4。
+/** REST + WebSocket 客户端。
  *  - backend/token 来自页面 URL 参数（Electron 以 ?backend=http://127.0.0.1:PORT&token=xx 打开）；
  *    缺省 = 同源（开发模式走 vite 代理）。
  */
@@ -71,7 +71,7 @@ export const openPath = (path: string) => post<OpenResult>('/api/open', { path }
 // ---- 多图图库 ----
 export const getLibrary = () => req<{ images: LibraryItem[] }>('/api/library')
 export const selectLibrary = (id: number) =>
-  post<{ id: number; name: string; width: number; height: number; serial: number }>(
+  post<{ id: number; name: string; width: number; height: number; serial: number; dof?: DofParams | null }>(
     '/api/library/select', { id })
 export const removeLibrary = (id: number) =>
   post<{ images: LibraryItem[] }>('/api/library/remove', { id })
@@ -119,7 +119,7 @@ export interface NativeBridge {
 }
 
 export const native: NativeBridge | null =
-  (window as unknown as { photolabNative?: NativeBridge }).photolabNative ?? null
+  (window as unknown as { fernlensNative?: NativeBridge }).fernlensNative ?? null
 
 /** Electron：原生打开对话框（支持多选）→ 按路径逐张入列（支持 RAW）。 */
 export async function openDesktop(): Promise<string[] | null> {
@@ -128,7 +128,7 @@ export async function openDesktop(): Promise<string[] | null> {
 }
 
 /** Electron：原生保存对话框 → 渲染 → 落盘。返回保存路径（取消返回 null）。 */
-export async function saveDesktop(adjustments: Adjustments, defaultName = 'photolab.png'): Promise<string | null> {
+export async function saveDesktop(adjustments: Adjustments, defaultName = 'fernlens.png'): Promise<string | null> {
   if (!native) return null
   const path = await native.saveImageDialog(defaultName)
   if (!path) return null
@@ -141,6 +141,14 @@ export async function saveDesktop(adjustments: Adjustments, defaultName = 'photo
 
 export const applyStamp = (src_rect: RectNorm, dst_rect: RectNorm, feather: number) =>
   post<{ serial: number }>('/api/stamp', { src_rect, dst_rect, feather })
+export const applyStampBrush = (
+  src_start: [number, number],
+  points: [number, number][],
+  radius: number,
+  feather: number,
+  opacity: number,
+) =>
+  post<{ serial: number }>('/api/stamp/brush', { src_start, points, radius, feather, opacity })
 export const stampUndo = () => post<{ serial: number }>('/api/stamp/undo', {})
 export const stampClear = () => post<{ serial: number }>('/api/stamp/clear', {})
 
@@ -236,6 +244,75 @@ export const autoGrade = (mode: 'rule' | 'ai', cfg?: AiConfig, intent?: string) 
   post<{ adjustments: Partial<Adjustments>; note: string; model: string }>(
     '/api/auto', { mode, config: cfg ? aiConfigPayload(cfg) : undefined,
       intent: intent ? intent.trim() : undefined, strength: cfg ? cfg.strength : undefined })
+
+export type DepthRelightPreset = 'studio' | 'atmosphere' | 'warm_cool' | 'cinematic'
+
+export interface DofParams {
+  focus: number
+  aperture: number
+  dof_range: number
+  bokeh_highlight: number
+}
+
+export interface DofPickResult {
+  focus: number
+  depth_preview_png: string
+}
+
+export interface DofResult extends DofParams {
+  serial: number
+  active: boolean
+  depth_preview_png: string
+}
+
+export const aiDofPick = (x: number, y: number, dof_range = 20) =>
+  post<DofPickResult>('/api/ai/dof/pick', { x, y, dof_range })
+
+export const aiDofApply = (params: DofParams) =>
+  post<DofResult>('/api/ai/dof', params)
+
+export const aiDofClear = () =>
+  post<{ serial: number; active: boolean }>('/api/ai/dof/clear', {})
+
+export interface DepthRelightResult {
+  preset: string
+  model: string
+  depth_preview_png: string
+  preview_w: number
+  preview_h: number
+  masks: MaskState[]
+}
+
+export const aiDepthRelight = (
+  preset: DepthRelightPreset,
+  strength = 1.0,
+  near_bias = 0.0,
+  masks_only = false,
+) =>
+  post<DepthRelightResult>('/api/ai/depth-relight', { preset, strength, near_bias, masks_only })
+
+export interface ColorMatchResult {
+  adjustments: Partial<Adjustments>
+  ref_palette: string[]
+  src_palette: string[]
+  protect_subject: boolean
+  note: string
+}
+
+export async function aiColorMatch(opts: {
+  file?: File
+  refId?: number
+  strength?: number
+  protectSubject?: boolean
+}): Promise<ColorMatchResult> {
+  const fd = new FormData()
+  if (opts.file) fd.append('file', opts.file)
+  if (opts.refId != null) fd.append('ref_id', String(opts.refId))
+  fd.append('strength', String(opts.strength ?? 0.75))
+  fd.append('protect_subject', opts.protectSubject ? 'true' : 'false')
+  return req<ColorMatchResult>('/api/ai/color-match', { method: 'POST', body: fd })
+}
+
 export const fetchHistogram = () => req<HistData>('/api/histogram')
 
 // ---- WebSocket 帧通道 ----

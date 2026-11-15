@@ -1,13 +1,13 @@
 #!/bin/bash
 # ==================================================================
-# PhotoLab — macOS 打包脚本（在 Mac 上运行，需 macOS 11+）
+# FernLens — macOS 打包脚本（在 Mac 上运行，需 macOS 11+）
 #
 # 用法：
 #   chmod +x package.command
 #   ./package.command              # 按当前机器架构构建 dmg + zip
 #   ./package.command --universal  # 说明见下方“关于双架构”
 #
-# 产物：desktop/release/PhotoLab-Setup-<version>-<arch>.dmg 与 .zip
+# 产物：desktop/release/FernLens-Setup-<version>-<arch>.dmg 与 .zip
 #
 # 为什么必须在 Mac 上跑：
 #   1. PyInstaller 不能交叉编译，sidecar 必须是本机 Mach-O 二进制；
@@ -21,7 +21,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 echo "=========================="
-echo " PhotoLab macOS 打包"
+echo " FernLens macOS 打包"
 echo "=========================="
 echo "架构：$(uname -m)   系统：$(sw_vers -productVersion)"
 
@@ -49,8 +49,8 @@ python -m pip install --upgrade pip >/dev/null
 echo "[2/5] 安装依赖（含 macOS 可选组件）..."
 # PySide6 只服务旧版桌面 UI 与 tests.py --ui，服务端 sidecar 不 import 它；
 # 排除后能少下 ~150MB，桌面版产物也更小。
-grep -v -i '^PySide6' requirements.txt > /tmp/photolab-req.txt
-python -m pip install -r /tmp/photolab-req.txt
+grep -v -i '^PySide6' requirements.txt > /tmp/fernlens-req.txt
+python -m pip install -r /tmp/fernlens-req.txt
 # 可选组件：失败不阻断基础功能（RAW 解码 / GPU / 本地蒙版）
 python -m pip install rawpy onnxruntime pyinstaller || \
   echo "[提示] rawpy/onnxruntime/pyinstaller 安装失败，稍后功能会相应降级"
@@ -70,10 +70,10 @@ popd >/dev/null
 echo
 echo "[4/5] PyInstaller 打包服务端 sidecar（约 1-3 分钟）..."
 rm -rf backend-dist
-.venv/bin/pyinstaller build/photolab-server.spec --noconfirm --distpath backend-dist
+.venv/bin/pyinstaller build/fernlens-server.spec --noconfirm --distpath backend-dist
 
 # PyInstaller 会自带执行位，这里再补一次，防止某些文件系统丢权限
-chmod 755 backend-dist/photolab-server/photolab-server
+chmod 755 backend-dist/fernlens-server/fernlens-server
 
 # ---- 4. 打包 Electron 应用 ----
 echo
@@ -97,4 +97,4 @@ echo " 完成。产物：desktop/release/"
 ls -lh desktop/release/*.dmg desktop/release/*.zip 2>/dev/null || true
 echo
 echo "未签名应用首次打开：右键 → 打开，或执行"
-echo "  xattr -dr com.apple.quarantine /Applications/PhotoLab.app"
+echo "  xattr -dr com.apple.quarantine /Applications/FernLens.app"

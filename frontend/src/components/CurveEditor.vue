@@ -6,6 +6,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { buildLut } from '@/lib/curve'
 import { CURVE_CHANNEL_COLORS, CURVE_CHANNEL_LABELS } from '@/lib/presets'
 import { vTip } from '@/lib/tip'
+import { getCanvasPalette, themeId } from '@/lib/theme'
+import { t, tx } from '@/lib/i18n'
 import type { CurveChannel, CurvePoints } from '@/api/types'
 import { CURVE_CHANNELS, defaultCurves } from '@/api/types'
 import Icon from '@/components/Icon'
@@ -39,7 +41,18 @@ const CHANNEL_HINT: Record<string, string> = {
   green: '绿通道：上移加绿、下移加品红。白平衡微调后仍偏绿时用它校正。',
   blue: '蓝通道：上移加蓝、下移加黄。给阴影加蓝、给高光加黄是最常用的「电影感」手法。',
 }
-const channelHint = computed(() => CHANNEL_HINT[channel.value] || '')
+const channelHint = computed(() =>
+  tx(CHANNEL_HINT[channel.value] || '', t('curve.tip')),
+)
+function channelLabel(ch: CurveChannel): string {
+  const map: Record<CurveChannel, string> = {
+    master: tx(CURVE_CHANNEL_LABELS[ch], 'RGB'),
+    red: tx(CURVE_CHANNEL_LABELS[ch], 'Red'),
+    green: tx(CURVE_CHANNEL_LABELS[ch], 'Green'),
+    blue: tx(CURVE_CHANNEL_LABELS[ch], 'Blue'),
+  }
+  return map[ch]
+}
 
 let dragIndex: number | null = null
 let selected: number | null = null
@@ -120,11 +133,12 @@ function redraw(): void {
   const ctx = cv.getContext('2d')!
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   const r = plotRect()
-  ctx.fillStyle = '#0a0c10'
+  const pal = getCanvasPalette(themeId.value)
+  ctx.fillStyle = pal.wellBg
   ctx.fillRect(0, 0, el.clientWidth, el.clientHeight)
 
   // 网格
-  ctx.strokeStyle = 'rgba(255,255,255,0.055)'
+  ctx.strokeStyle = pal.gridLine
   ctx.lineWidth = 1
   for (let i = 1; i <= 3; i++) {
     const x = r.left + r.w * i / 4
@@ -133,7 +147,7 @@ function redraw(): void {
     ctx.beginPath(); ctx.moveTo(r.left, y); ctx.lineTo(r.left + r.w, y); ctx.stroke()
   }
   // 虚线对角线
-  ctx.strokeStyle = 'rgba(255,255,255,0.16)'
+  ctx.strokeStyle = pal.axisLine
   ctx.setLineDash([4, 4])
   const [dx0, dy0] = toWidget(0.02, 0.02)
   const [dx1, dy1] = toWidget(0.98, 0.98)
@@ -145,7 +159,7 @@ function redraw(): void {
     drawHistogramLayer(ctx, r, props.hist.red, 'rgb(226,92,92)', 70 / 255)
     drawHistogramLayer(ctx, r, props.hist.green, 'rgb(118,200,110)', 70 / 255)
     drawHistogramLayer(ctx, r, props.hist.blue, 'rgb(96,150,230)', 70 / 255)
-    drawHistogramLayer(ctx, r, props.hist.master, 'rgb(200,200,205)', 50 / 255)
+    drawHistogramLayer(ctx, r, props.hist.master, themeId.value === 'dark' ? 'rgb(200,200,205)' : 'rgb(60,70,88)', 50 / 255)
   }
 
   // 其它通道淡色
@@ -154,7 +168,8 @@ function redraw(): void {
       drawCurve(ctx, r, props.curves[ch], CURVE_CHANNEL_COLORS[ch], 60 / 255, 1)
     }
   }
-  drawCurve(ctx, r, points(), CURVE_CHANNEL_COLORS[channel.value], 1, 2)
+  const activeColor = channel.value === 'master' ? pal.text : CURVE_CHANNEL_COLORS[channel.value]
+  drawCurve(ctx, r, points(), activeColor, 1, 2)
 
   // 控制点
   const pts = points()
@@ -163,9 +178,9 @@ function redraw(): void {
     const sel = i === selected || i === dragIndex
     ctx.beginPath()
     ctx.arc(px, py, sel ? 5.5 : 4.2, 0, Math.PI * 2)
-    ctx.fillStyle = sel ? '#ecedf1' : '#0a0c10'
+    ctx.fillStyle = sel ? pal.text : pal.wellBg
     ctx.fill()
-    ctx.strokeStyle = sel ? '#7d8bff' : CURVE_CHANNEL_COLORS[channel.value]
+    ctx.strokeStyle = sel ? pal.accent : activeColor
     ctx.lineWidth = 1.5
     ctx.stroke()
   }
@@ -302,6 +317,7 @@ onMounted(() => {
 onBeforeUnmount(() => ro?.disconnect())
 
 watch(() => props.hist, () => redraw(), { deep: false })
+watch(themeId, () => redraw())
 watch(channel, () => { selected = null; redraw() })
 watch(() => props.curves, () => redraw(), { deep: true })
 
@@ -321,10 +337,10 @@ function resetChannel(): void {
         :key="ch"
         class="ch-tab"
         :class="{ active: ch === channel }"
-        :style="ch === channel ? { color: CURVE_CHANNEL_COLORS[ch] } : {}"
+        :style="ch === channel && ch !== 'master' ? { color: CURVE_CHANNEL_COLORS[ch] } : {}"
         @click="channel = ch"
-      >{{ CURVE_CHANNEL_LABELS[ch] }}</button>
-      <button class="ch-reset" title="复位当前通道" @click="resetChannel"><Icon name="reset" :size="12" /></button>
+      >{{ channelLabel(ch) }}</button>
+      <button class="ch-reset" :title="t('curve.resetChannel')" @click="resetChannel"><Icon name="reset" :size="12" /></button>
     </div>
     <div ref="wrap" v-tip="channelHint" class="plot has-hint">
       <canvas
@@ -359,8 +375,8 @@ function resetChannel(): void {
   cursor: pointer;
   transition: background 0.14s var(--ease), color 0.14s var(--ease);
 }
-.ch-tab:hover { color: var(--text-2); background: rgba(255, 255, 255, 0.05); }
-.ch-tab.active { background: rgba(255, 255, 255, 0.08); }
+.ch-tab:hover { color: var(--text-2); background: var(--surface-1); }
+.ch-tab.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
 .ch-reset {
   margin-left: auto;
   width: 22px;
@@ -375,7 +391,7 @@ function resetChannel(): void {
   cursor: pointer;
   transition: background 0.14s var(--ease), color 0.14s var(--ease);
 }
-.ch-reset:hover { background: rgba(255, 255, 255, 0.07); color: var(--accent); }
+.ch-reset:hover { background: var(--surface-2); color: var(--accent); }
 .plot {
   position: relative;
   width: 100%;

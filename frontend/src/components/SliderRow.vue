@@ -132,7 +132,7 @@ function reset(): void {
   user-select: none;
   transition: background 0.14s var(--ease);
 }
-.srow:hover { background: rgba(255, 243, 228, 0.028); }
+.srow:hover { background: var(--surface-1); }
 /* 改过的参数：左侧一道琥珀刻线，扫一眼就知道哪里动过 */
 .srow.modified::before {
   content: "";
@@ -160,7 +160,7 @@ function reset(): void {
 /* 有说明的标签：虚线下划线暗示「可以停一下看看」 */
 .srow-label.has-hint {
   cursor: help;
-  text-decoration: underline dotted rgba(255, 243, 228, 0.22);
+  text-decoration: underline dotted var(--line-2);
   text-underline-offset: 3px;
 }
 .srow-label.has-hint:hover { text-decoration-color: var(--accent-line); }

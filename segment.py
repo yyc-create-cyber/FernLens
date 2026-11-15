@@ -1,4 +1,4 @@
-"""PhotoLab 本地像素级 AI 分割：SAM 2.1 Hiera-Tiny + U²-Net + SkySeg + YOLOv8n。
+"""FernLens 本地像素级 AI 分割：SAM 2.1 Hiera-Tiny + U²-Net + SkySeg + YOLOv8n。
 
 全部走 ONNX Runtime（CPU），无需 PyTorch；模型权重从 hf-mirror.com 下载或
 随安装包分发，位于仓库 models/ 目录。四个识别目标的策略：
@@ -26,7 +26,7 @@ import numpy as np
 import core
 
 # ---------------------------------------------------------------- 模型注册
-# (文件名, 期望字节数, hf-mirror 路径)。期望大小用于完整性校验（±2% 容差）。
+# (文件名, 期望字节数, HuggingFace 仓库路径)。期望大小用于完整性校验（±2% 容差）。
 MODELS: dict = {
     "sam_encoder": ("sam2.1_hiera_tiny.encoder.onnx", 109_443_000,
                     "akiyamanx/sam2.1-hiera-tiny-onnx/resolve/main/sam2.1_hiera_tiny.encoder.onnx"),
@@ -38,6 +38,8 @@ MODELS: dict = {
                "JianyuanWang/skyseg/resolve/main/skyseg.onnx"),
     "yolov8n": ("yolov8n.onnx", 12_600_000,
                 "salim4n/yolov8n-detect-onnx/resolve/main/yolov8n-onnx-web/yolov8n.onnx"),
+    "depth_anything_v2": ("depth_anything_v2_small_q.onnx", 27_258_801,
+                          "onnx-community/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx"),
 }
 
 def _models_dir() -> str:
@@ -46,13 +48,14 @@ def _models_dir() -> str:
         bundled = os.path.join(getattr(sys, "_MEIPASS", ""), "models")
         if os.path.isdir(bundled):
             return bundled
-        # 未内置模型：落到 exe 同级可写目录，供 hf-mirror 按需下载（结果可持久保存）
+        # 未内置模型：落到 exe 同级可写目录，供按需下载（结果可持久保存）
         return os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "models")
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 
 MODELS_DIR = _models_dir()
-_MIRROR = "https://hf-mirror.com/"
+_HF_PRIMARY = "https://huggingface.co/"
+_HF_FALLBACK = "https://hf-mirror.com/"
 
 # 掩码输出分辨率（最长边；归一化存储，渲染时放大）
 MASK_LONG_EDGE = 1024
@@ -91,6 +94,25 @@ def download_progress() -> dict:
         return {**_download_state, "models": models_status()}
 
 
+def _download_file(url: str, part: str, size: int) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": "FernLens/1.0"})
+    got = os.path.getsize(part) if os.path.isfile(part) else 0
+    if got:
+        req.add_header("Range", f"bytes={got}-")   # 断点续传
+    with urllib.request.urlopen(req, timeout=60) as resp, \
+            open(part, "ab" if got else "wb") as f:
+        total = got + int(resp.headers.get("Content-Length") or 0)
+        with _download_lock:
+            _download_state.update(received=got, total=total or size)
+        while True:
+            chunk = resp.read(1 << 18)
+            if not chunk:
+                break
+            f.write(chunk)
+            with _download_lock:
+                _download_state["received"] += len(chunk)
+
+
 def _download_all() -> None:
     global _download_state
     os.makedirs(MODELS_DIR, exist_ok=True)
@@ -101,24 +123,16 @@ def _download_all() -> None:
                 continue                                   # 已就绪
             with _download_lock:
                 _download_state.update(current=name, received=0, total=size, error="")
-            url = _MIRROR + path
-            req = urllib.request.Request(url)
             part = dst + ".part"
-            got = os.path.getsize(part) if os.path.isfile(part) else 0
-            if got:
-                req.add_header("Range", f"bytes={got}-")   # 断点续传
-            with urllib.request.urlopen(req, timeout=60) as resp, \
-                    open(part, "ab" if got else "wb") as f:
-                total = got + int(resp.headers.get("Content-Length") or 0)
-                with _download_lock:
-                    _download_state.update(received=got, total=total or size)
-                while True:
-                    chunk = resp.read(1 << 18)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    with _download_lock:
-                        _download_state["received"] += len(chunk)
+            try:
+                _download_file(_HF_PRIMARY + path, part, size)
+            except Exception:
+                if os.path.isfile(part):
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+                _download_file(_HF_FALLBACK + path, part, size)
             if abs(os.path.getsize(part) - size) / max(size, 1) > 0.02:
                 raise RuntimeError(f"{name} 大小校验失败（期望 {size} 字节）")
             os.replace(part, dst)
@@ -137,7 +151,7 @@ def start_download() -> dict:
             return {"started": False, "reason": "already"}
         _download_state.update(running=True, done=False, error="")
     threading.Thread(target=_download_all, daemon=True,
-                     name="photolab-model-dl").start()
+                     name="fernlens-model-dl").start()
     return {"started": True}
 
 
@@ -383,10 +397,72 @@ def _largest_component(mask01: np.ndarray):
     return [(cx, cy)], [(float(x), float(y), float(x + w2), float(y + h2))]
 
 
-_LABELS = {"subject": "主体", "person": "人物", "background": "背景", "sky": "天空"}
+_LABELS = {
+    "subject": "主体",
+    "person": "人物",
+    "background": "背景",
+    "sky": "天空",
+    "depth_near": "近景景深",
+    "depth_far": "远景景深",
+}
 
 
-def _to_mask_dict(target: str, prob: np.ndarray) -> dict:
+# ---------------------------------------------------------------- Depth Anything V2
+_depth_cache: tuple = ()
+_depth_lock = threading.Lock()
+
+
+def _img_sig(rgb8: np.ndarray) -> tuple:
+    step_y = max(1, rgb8.shape[0] // 32)
+    step_x = max(1, rgb8.shape[1] // 32)
+    return (rgb8.shape[:2], hash(rgb8[::step_y, ::step_x].tobytes()))
+
+
+def estimate_depth(rgb8: np.ndarray) -> np.ndarray:
+    """Depth Anything V2 Small ONNX 深度估计 -> (H, W) float32 ∈ [0, 1]（1=最近前景, 0=最远背景）。"""
+    global _depth_cache
+    sig = _img_sig(rgb8)
+    with _depth_lock:
+        if _depth_cache and _depth_cache[0] == sig:
+            return _depth_cache[1]
+
+    h, w = rgb8.shape[:2]
+    scale = 518.0 / float(max(h, w))
+    rh = max(14, (round(h * scale) // 14) * 14)
+    rw = max(14, (round(w * scale) // 14) * 14)
+    small = cv2.resize(rgb8, (rw, rh), interpolation=cv2.INTER_CUBIC)
+    x = small.astype(np.float32) / np.float32(255.0)
+    x = (x - _IMAGENET_MEAN) / _IMAGENET_STD
+    x = x.transpose(2, 0, 1)[None]
+
+    sess = _session("depth_anything_v2")
+    raw = np.asarray(sess.run(None, {sess.get_inputs()[0].name: x})[0][0], np.float32)
+    lo = float(np.percentile(raw, 1.0))
+    hi = float(np.percentile(raw, 99.0))
+    if hi - lo < 1e-5:
+        norm = np.full_like(raw, 0.5)
+    else:
+        norm = np.clip((raw - lo) / (hi - lo), 0.0, 1.0)
+    depth = cv2.resize(norm, (w, h), interpolation=cv2.INTER_LINEAR)
+    with _depth_lock:
+        _depth_cache = (sig, depth)
+    return depth
+
+
+def depth_masks(rgb8: np.ndarray, near_bias: float = 0.0) -> tuple:
+    """生成平滑前景/远景景深软掩码 + 缩略深度预览图（base64 PNG）。"""
+    depth = estimate_depth(rgb8)
+    bias = float(np.clip(near_bias, -0.35, 0.35))
+    e0 = np.float32(np.clip(0.32 + bias, 0.02, 0.85))
+    e1 = np.float32(np.clip(0.72 + bias, e0 + 0.08, 0.99))
+    near = core.smoothstep(e0, e1, depth)
+    far = np.float32(1.0) - near
+    preview = _resize_long_edge((np.clip(depth, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8), 360)
+    preview_b64, pw, ph = core.encode_mask_png(preview.astype(np.float32) / np.float32(255.0))
+    return near, far, preview_b64, pw, ph
+
+
+def _to_mask_dict(target: str, prob: np.ndarray, model_name: str = "local(SAM2.1-tiny+U2Net)") -> dict:
     """概率图 -> 统一 1024 长边 base64 PNG 响应。"""
     prob = np.clip(prob, 0.0, 1.0)
     u8 = (prob * 255.0 + 0.5).astype(np.uint8)
@@ -395,7 +471,7 @@ def _to_mask_dict(target: str, prob: np.ndarray) -> dict:
         raise ValueError(f"画面中未识别到「{_LABELS[target]}」")
     b64, w, h = core.encode_mask_png(u8.astype(np.float32) / np.float32(255.0))
     return {"target": target, "mask_png": b64, "width": w, "height": h,
-            "model": "local(SAM2.1-tiny+U2Net)"}
+            "model": model_name}
 
 
 def segment_local(rgb8: np.ndarray, target: str) -> dict:
@@ -418,5 +494,10 @@ def segment_local(rgb8: np.ndarray, target: str) -> dict:
         if not boxes:
             raise ValueError("画面中未识别到「人物」")
         return _to_mask_dict("person", _sam2.predict(rgb8, [], boxes))
+
+    if target in ("depth_near", "depth_far"):
+        near, far, _, _, _ = depth_masks(rgb8)
+        prob = near if target == "depth_near" else far
+        return _to_mask_dict(target, prob, "local(Depth-Anything-V2-Small)")
 
     return _to_mask_dict("sky", _u2net_run("skyseg", rgb8))

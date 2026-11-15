@@ -97,12 +97,16 @@ function textOf(b: unknown): string {
 
 export const vTip = {
   mounted(el: HTMLElement, binding: { value: TipBinding }) {
-    const delay = typeof binding.value === 'object' && binding.value?.delay != null
-      ? binding.value.delay
-      : SHOW_DELAY
+    const store = el as HTMLElement & {
+      __tipHandlers?: [() => void, () => void]
+      __tipBinding?: TipBinding
+    }
+    store.__tipBinding = binding.value
     const enter = (): void => {
-      const text = textOf(binding.value)
+      const cur = store.__tipBinding
+      const text = textOf(cur)
       if (!text) return
+      const delay = typeof cur === 'object' && cur?.delay != null ? cur.delay : SHOW_DELAY
       window.clearTimeout(timer)
       timer = window.setTimeout(() => show(el, text), delay)
     }
@@ -110,16 +114,17 @@ export const vTip = {
     el.addEventListener('pointerenter', enter)
     el.addEventListener('pointerleave', leave)
     el.addEventListener('pointerdown', leave)
-    const store = el as HTMLElement & { __tipHandlers?: [() => void, () => void] }
     store.__tipHandlers = [enter, leave]
   },
   updated(el: HTMLElement, binding: { value: TipBinding }) {
-    // 文案随状态变化（例如蒙版类型切换）时无需重建，读取时已是最新
-    void el
-    void binding
+    const store = el as HTMLElement & { __tipBinding?: TipBinding }
+    store.__tipBinding = binding.value
   },
   unmounted(el: HTMLElement) {
-    const store = el as HTMLElement & { __tipHandlers?: [() => void, () => void] }
+    const store = el as HTMLElement & {
+      __tipHandlers?: [() => void, () => void]
+      __tipBinding?: TipBinding
+    }
     const h = store.__tipHandlers
     if (h) {
       el.removeEventListener('pointerenter', h[0])
@@ -127,6 +132,7 @@ export const vTip = {
       el.removeEventListener('pointerdown', h[1])
       delete store.__tipHandlers
     }
+    delete store.__tipBinding
     hide()
   },
 }

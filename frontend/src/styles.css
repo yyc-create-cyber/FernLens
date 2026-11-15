@@ -1,61 +1,200 @@
 /* ============================================================
-   PhotoLab — 暗房（Darkroom）设计系统 · v2
-   -----------------------------------------------------------
-   基调：暖中性近黑（不是冷灰），像暗房里被安全灯照过的相纸；
-   层级靠明度 + 1px 暖白描边，强调色只用安全灯的琥珀色，
-   且只出现在选中、焦点、改动过的读数上——不干扰对色彩的判断。
-   字体：Bahnschrift（仪表盘式读数）+ 系统中文；品牌字用衬线。
+   FernLens — Multi-Theme Design System (Light Glass / Dark Glass / Art Ochre)
    ============================================================ */
-:root {
+
+:root,
+:root[data-theme="dark"] {
   color-scheme: dark;
 
-  /* 表面（暖中性，由深到浅） */
-  --bg:        #0a0908;   /* 应用底 */
-  --bg-canvas: #060505;   /* 图像外围画布（更黑，让照片浮起来） */
-  --panel:     #100e0c;   /* 面板 */
-  --panel-2:   #16130f;   /* 面板内块 */
-  --raise:     #1e1a16;   /* 悬浮 / 输入 */
-  --well:      #060505;   /* 凹陷（滑轨槽、缩略图底） */
+  /* Dark: Pure Black canvas + White text + Deep-Blue Frosted Glass */
+  --bg:            #000000;
+  --bg-canvas:     #000000;
+  --panel:         rgba(10, 27, 62, 0.72);
+  --panel-solid:   #08152e;
+  --panel-2:       rgba(16, 40, 88, 0.56);
+  --raise:         #0f2247;
+  --well:          #050b16;
 
-  /* 描边（暖白，退到几乎不可见） */
-  --line:      rgba(255, 243, 228, 0.065);
-  --line-2:    rgba(255, 243, 228, 0.13);
-  --line-3:    rgba(255, 243, 228, 0.22);
+  --glass-bg:      rgba(9, 25, 58, 0.72);
+  --glass-sub:     rgba(12, 32, 74, 0.68);
+  --glass-modal:   rgba(8, 21, 48, 0.86);
+  --glass-blur:    blur(22px) saturate(1.55);
+  --glass-shadow:  0 8px 30px rgba(0, 0, 0, 0.62), inset 0 1px 0 rgba(147, 197, 253, 0.14);
 
-  /* 文本（暖白，避免纯白的刺眼） */
-  --text:      #f3ece2;
-  --text-2:    #a89d90;
-  --text-3:    #6d6358;
+  --line:          rgba(147, 197, 253, 0.14);
+  --line-2:        rgba(147, 197, 253, 0.24);
+  --line-3:        rgba(147, 197, 253, 0.38);
 
-  /* 强调：安全灯琥珀 */
-  --accent:      #e0a163;
-  --accent-hi:   #f4c191;
-  --accent-soft: rgba(224, 161, 99, 0.13);
-  --accent-line: rgba(224, 161, 99, 0.45);
-  --accent-text: #f7d8b4;
+  --text:          #ffffff;
+  --text-2:        #d5e3f7;
+  --text-3:        #8ba4c7;
 
-  /* 语义色（低饱和，和暖底同族） */
-  --success: #8fc9a4;
-  --warn:    #e6b463;
-  --danger:  #e08a86;
+  --accent:        #60a5fa;
+  --accent-hi:     #93c5fd;
+  --accent-soft:   rgba(59, 130, 246, 0.24);
+  --accent-line:   rgba(96, 165, 250, 0.56);
+  --accent-text:   #e0f0ff;
 
-  /* 滑轨 */
-  --track: rgba(255, 243, 228, 0.10);
-  --fill:  rgba(255, 243, 228, 0.55);
+  --surface-1:     rgba(147, 197, 253, 0.08);
+  --surface-2:     rgba(147, 197, 253, 0.14);
+  --surface-3:     rgba(147, 197, 253, 0.22);
+  --surface-hover: rgba(147, 197, 253, 0.13);
 
-  /* 圆角 */
+  --solid-bg:      linear-gradient(180deg, #3b82f6, #1d4ed8);
+  --solid-bg-hi:   linear-gradient(180deg, #60a5fa, #2563eb);
+  --solid-text:    #ffffff;
+
+  --success:       #4ade80;
+  --warn:          #fbbf24;
+  --danger:        #f87171;
+
+  --track:         rgba(147, 197, 253, 0.20);
+  --fill:          rgba(191, 219, 254, 0.78);
+  --zero-tick:     rgba(147, 197, 253, 0.36);
+  --thumb-bg:      #ffffff;
+  --thumb-active:  #dbeafe;
+  --thumb-shadow:  0 1px 4px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(59, 130, 246, 0.4);
+
+  --tip-bg:        #0a1a38;
+  --tip-border:    rgba(96, 165, 250, 0.35);
+  --tip-text:      #eff6ff;
+  --kbd-bg:        rgba(147, 197, 253, 0.12);
+  --scroll-thumb:  rgba(147, 197, 253, 0.20);
+  --scroll-hover:  rgba(147, 197, 253, 0.38);
+
   --r-1: 5px;
   --r-2: 8px;
   --r-3: 12px;
-
   --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
 
-  /* 字体 */
-  --font-ui: "Segoe UI Variable Text", "Segoe UI", -apple-system,
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", Inter, -apple-system,
              "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
   --font-display: "Bahnschrift", "DIN Alternate", "Segoe UI Variable Display",
                   "Microsoft YaHei UI", sans-serif;
   --font-brand: "Cambria", "Constantia", "Songti SC", "SimSun", serif;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* Light: White canvas + Black text + Light-Blue Frosted Glass */
+  --bg:            #ffffff;
+  --bg-canvas:     #ffffff;
+  --panel:         rgba(216, 236, 255, 0.72);
+  --panel-solid:   #f0f7ff;
+  --panel-2:       rgba(232, 244, 255, 0.76);
+  --raise:         #ffffff;
+  --well:          #e8f3ff;
+
+  --glass-bg:      rgba(214, 236, 255, 0.74);
+  --glass-sub:     rgba(225, 242, 255, 0.74);
+  --glass-modal:   rgba(242, 248, 255, 0.88);
+  --glass-blur:    blur(22px) saturate(1.55);
+  --glass-shadow:  0 6px 24px rgba(30, 64, 175, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.75);
+
+  --line:          rgba(37, 99, 235, 0.15);
+  --line-2:        rgba(37, 99, 235, 0.25);
+  --line-3:        rgba(37, 99, 235, 0.42);
+
+  --text:          #0a0f1c;
+  --text-2:        #1e293b;
+  --text-3:        #475569;
+
+  --accent:        #2563eb;
+  --accent-hi:     #1d4ed8;
+  --accent-soft:   rgba(37, 99, 235, 0.14);
+  --accent-line:   rgba(37, 99, 235, 0.45);
+  --accent-text:   #1e3a8a;
+
+  --surface-1:     rgba(37, 99, 235, 0.065);
+  --surface-2:     rgba(37, 99, 235, 0.12);
+  --surface-3:     rgba(37, 99, 235, 0.18);
+  --surface-hover: rgba(37, 99, 235, 0.11);
+
+  --solid-bg:      linear-gradient(180deg, #2563eb, #1d4ed8);
+  --solid-bg-hi:   linear-gradient(180deg, #3b82f6, #2563eb);
+  --solid-text:    #ffffff;
+
+  --success:       #15803d;
+  --warn:          #b45309;
+  --danger:        #dc2626;
+
+  --track:         rgba(15, 23, 42, 0.14);
+  --fill:          rgba(37, 99, 235, 0.65);
+  --zero-tick:     rgba(15, 23, 42, 0.30);
+  --thumb-bg:      #ffffff;
+  --thumb-active:  #eff6ff;
+  --thumb-shadow:  0 1px 4px rgba(15, 23, 42, 0.28), 0 0 0 1px rgba(37, 99, 235, 0.42);
+
+  --tip-bg:        #0f172a;
+  --tip-border:    rgba(59, 130, 246, 0.42);
+  --tip-text:      #f8fafc;
+  --kbd-bg:        rgba(15, 23, 42, 0.08);
+  --scroll-thumb:  rgba(37, 99, 235, 0.18);
+  --scroll-hover:  rgba(37, 99, 235, 0.34);
+}
+
+:root[data-theme="art"] {
+  color-scheme: light;
+
+  /* Art: Light Ochre background + Black text + NO frosted glass */
+  --bg:            #ebd5b3;
+  --bg-canvas:     #edd8b7;
+  --panel:         #e5cb9f;
+  --panel-solid:   #e5cb9f;
+  --panel-2:       #f3e3c8;
+  --raise:         #f8ebd3;
+  --well:          #dec08f;
+
+  --glass-bg:      #e5cb9f;
+  --glass-sub:     #edd7b1;
+  --glass-modal:   #f5e7ce;
+  --glass-blur:    none;
+  --glass-shadow:  0 2px 10px rgba(72, 46, 18, 0.12);
+
+  --line:          rgba(68, 44, 18, 0.18);
+  --line-2:        rgba(68, 44, 18, 0.28);
+  --line-3:        rgba(68, 44, 18, 0.44);
+
+  --text:          #140f0a;
+  --text-2:        #2b2116;
+  --text-3:        #5e4b35;
+
+  --accent:        #8b4513;
+  --accent-hi:     #6e340b;
+  --accent-soft:   rgba(139, 69, 19, 0.14);
+  --accent-line:   rgba(139, 69, 19, 0.48);
+  --accent-text:   #5e2806;
+
+  --surface-1:     rgba(68, 44, 18, 0.06);
+  --surface-2:     rgba(68, 44, 18, 0.11);
+  --surface-3:     rgba(68, 44, 18, 0.18);
+  --surface-hover: rgba(68, 44, 18, 0.10);
+
+  --solid-bg:      linear-gradient(180deg, #9a4f1b, #7a3b10);
+  --solid-bg-hi:   linear-gradient(180deg, #b05c22, #8b4513);
+  --solid-text:    #fdf5e6;
+
+  --success:       #2f6f3e;
+  --warn:          #9a5b13;
+  --danger:        #a82c24;
+
+  --track:         rgba(68, 44, 18, 0.20);
+  --fill:          rgba(139, 69, 19, 0.72);
+  --zero-tick:     rgba(68, 44, 18, 0.36);
+  --thumb-bg:      #fdf5e6;
+  --thumb-active:  #fffaf0;
+  --thumb-shadow:  0 1px 3px rgba(42, 26, 10, 0.4), 0 0 0 1px rgba(139, 69, 19, 0.5);
+
+  --tip-bg:        #261c12;
+  --tip-border:    rgba(218, 178, 122, 0.35);
+  --tip-text:      #faf0de;
+  --kbd-bg:        rgba(68, 44, 18, 0.10);
+  --scroll-thumb:  rgba(68, 44, 18, 0.20);
+  --scroll-hover:  rgba(68, 44, 18, 0.36);
+
+  --font-ui: "Georgia", "Noto Serif SC", "Songti SC", "Microsoft YaHei UI", serif;
+  --font-brand: "Georgia", "Palatino Linotype", "Songti SC", serif;
 }
 
 * { box-sizing: border-box; }
@@ -78,9 +217,8 @@ body {
 }
 
 button { font: inherit; color: inherit; }
-::selection { background: rgba(224, 161, 99, 0.28); }
+::selection { background: var(--accent-soft); color: var(--text); }
 
-/* 等宽数字：所有读数对齐（仪表盘质感） */
 .num {
   font-family: var(--font-display);
   font-variant-numeric: tabular-nums;
@@ -88,36 +226,35 @@ button { font: inherit; color: inherit; }
   letter-spacing: 0.02em;
 }
 
-/* ---- 细滚动条：几乎隐形，悬停才显形 ---- */
-::-webkit-scrollbar { width: 9px; height: 9px; }
+/* ---- Scrollbar ---- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 243, 228, 0.07);
+  background: var(--scroll-thumb);
   border-radius: 99px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(255, 243, 228, 0.17); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-hover);
+  background-clip: padding-box;
+}
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-/* ============================================================
-   通用控件
-   ============================================================ */
-
-/* ---- 按钮 ---- */
+/* ---- Buttons ---- */
 .btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 30px;
-  padding: 0 12px;
+  padding: 0 11px;
   border: 1px solid transparent;
   border-radius: var(--r-2);
   background: transparent;
   color: var(--text-2);
   font-size: 12px;
   font-family: var(--font-ui);
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
   white-space: nowrap;
   cursor: pointer;
   transition: background 0.16s var(--ease), color 0.16s var(--ease),
@@ -125,42 +262,44 @@ button { font: inherit; color: inherit; }
               box-shadow 0.16s var(--ease);
 }
 .btn:hover:not(:disabled) {
-  background: rgba(255, 243, 228, 0.055);
+  background: var(--surface-hover);
   color: var(--text);
 }
-.btn:active:not(:disabled) { background: rgba(255, 243, 228, 0.085); }
-.btn:disabled { opacity: 0.28; cursor: default; }
+.btn:active:not(:disabled) { background: var(--surface-2); }
+.btn:disabled { opacity: 0.34; cursor: default; }
 .btn.on {
   background: var(--accent-soft);
   color: var(--accent-text);
   box-shadow: inset 0 0 0 1px var(--accent-line);
 }
-.btn.on:hover:not(:disabled) { background: rgba(224, 161, 99, 0.2); color: #ffe6c9; }
+.btn.on:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
 
-/* 主操作：奶油色实底 + 细内高光，像相纸标签 */
 .btn.solid {
-  background: linear-gradient(180deg, #f6f0e8, #e6dcce);
-  color: #14100c;
+  background: var(--solid-bg);
+  color: var(--solid-text);
   font-weight: 600;
   letter-spacing: 0.02em;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.5) inset, 0 2px 8px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.25) inset, 0 2px 8px rgba(0, 0, 0, 0.22);
 }
 .btn.solid:hover:not(:disabled) {
-  background: linear-gradient(180deg, #fffaf3, #f0e6d8);
-  color: #14100c;
+  background: var(--solid-bg-hi);
+  color: var(--solid-text);
 }
 .btn.outline { box-shadow: inset 0 0 0 1px var(--line-2); }
 .btn.outline:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--line-3); }
 .btn.icon { width: 30px; padding: 0; justify-content: center; }
 
-/* ---- 分段控件 ---- */
+/* ---- Segmented Control ---- */
 .seg {
   display: inline-flex;
   align-items: center;
   gap: 2px;
   padding: 2px;
   border-radius: var(--r-2);
-  background: rgba(255, 243, 228, 0.04);
+  background: var(--surface-1);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .seg > button {
@@ -171,41 +310,42 @@ button { font: inherit; color: inherit; }
   background: transparent;
   color: var(--text-3);
   font-size: 11px;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
   cursor: pointer;
   transition: background 0.16s var(--ease), color 0.16s var(--ease);
 }
 .seg > button:hover { color: var(--text-2); }
 .seg > button.on {
-  background: rgba(255, 243, 228, 0.10);
+  background: var(--surface-3);
   color: var(--text);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
 }
 
-/* ---- 小按钮（面板内） ---- */
+/* ---- Mini Buttons ---- */
 .mini {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  height: 23px;
+  height: 24px;
   padding: 0 9px;
   border: 0;
   border-radius: var(--r-1);
-  background: rgba(255, 243, 228, 0.045);
+  background: var(--surface-1);
   color: var(--text-2);
   font-size: 11px;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
   white-space: nowrap;
   cursor: pointer;
   transition: background 0.16s var(--ease), color 0.16s var(--ease);
 }
-.mini:hover { background: rgba(255, 243, 228, 0.1); color: var(--text); }
-.mini.on { background: var(--accent-soft); color: var(--accent-text); }
-.mini.danger:hover { background: rgba(224, 138, 134, 0.16); color: var(--danger); }
-.mini.square { width: 23px; padding: 0; gap: 0; }
+.mini:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.mini:disabled { opacity: 0.35; cursor: default; }
+.mini.on { background: var(--accent-soft); color: var(--accent-text); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.mini.danger:hover:not(:disabled) { background: rgba(220, 38, 38, 0.16); color: var(--danger); }
+.mini.square { width: 24px; padding: 0; gap: 0; }
 
-/* ---- 滑轨（SliderRow 与 MiniSlider 共用） ---- */
+/* ---- Range Sliders ---- */
 .pl-range {
   position: relative;
   flex: 1;
@@ -221,25 +361,24 @@ button { font: inherit; color: inherit; }
   position: absolute;
   left: 0;
   right: 0;
-  height: 2px;
+  height: 2.5px;
   border-radius: 2px;
   background: var(--track);
 }
 .pl-fill {
   position: absolute;
-  height: 2px;
+  height: 2.5px;
   border-radius: 2px;
   background: var(--fill);
   transition: background 0.16s var(--ease), box-shadow 0.16s var(--ease);
 }
-/* 中心刻线：双向参数的“零位” */
 .pl-zero {
   position: absolute;
   left: 50%;
   width: 1px;
   height: 8px;
   margin-left: -0.5px;
-  background: rgba(255, 243, 228, 0.18);
+  background: var(--zero-tick);
 }
 .pl-thumb {
   position: absolute;
@@ -247,29 +386,29 @@ button { font: inherit; color: inherit; }
   height: 11px;
   margin-left: -5.5px;
   border-radius: 50%;
-  background: #f6efe6;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7), 0 0 0 0.5px rgba(0, 0, 0, 0.5);
+  background: var(--thumb-bg);
+  box-shadow: var(--thumb-shadow);
   transition: transform 0.13s var(--ease), box-shadow 0.13s var(--ease);
 }
 .pl-range:hover .pl-thumb { transform: scale(1.16); }
 .pl-range.dragging .pl-fill {
   background: var(--accent);
-  box-shadow: 0 0 10px rgba(224, 161, 99, 0.45);
+  box-shadow: 0 0 10px var(--accent-soft);
 }
 .pl-range.dragging .pl-thumb {
-  transform: scale(1.3);
-  background: #fffaf2;
-  box-shadow: 0 0 0 4px rgba(224, 161, 99, 0.18), 0 1px 4px rgba(0, 0, 0, 0.7);
+  transform: scale(1.28);
+  background: var(--thumb-active);
+  box-shadow: 0 0 0 4px var(--accent-soft), var(--thumb-shadow);
 }
 
-/* ---- 键盘提示 ---- */
+/* ---- Keycap hint ---- */
 .kbd {
   display: inline-block;
   min-width: 16px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(255, 243, 228, 0.06);
-  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.4);
+  background: var(--kbd-bg);
+  box-shadow: inset 0 -1px 0 var(--line-2);
   color: var(--text-2);
   font-family: var(--font-display);
   font-size: 10px;
@@ -277,28 +416,30 @@ button { font: inherit; color: inherit; }
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- 图标 ---- */
+/* ---- Icons ---- */
 .pl-icon { display: block; flex: none; }
-.btn .pl-icon { opacity: 0.85; }
+.btn .pl-icon { opacity: 0.88; }
 .btn:hover .pl-icon { opacity: 1; }
 
-/* ---- 面板区块标题（小号字距标签，暗房仪表感） ---- */
+/* ---- Panel section title ---- */
 .block-title,
 .side-title {
   font-family: var(--font-display);
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-3);
 }
 
-/* ============================================================
-   悬浮提示气泡（v-tip）
-   ------------------------------------------------------------
-   挂在 body 上的单例，position: fixed，不受面板 overflow 裁剪。
-   暖黑底 + 琥珀描边，和暗房主题同族；箭头跟着目标中心走。
-   ============================================================ */
+/* ---- Frosted glass helper class ---- */
+.glass-surface {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* ---- Tooltip (v-tip) ---- */
 .pl-tip {
   position: fixed;
   z-index: 9999;
@@ -307,17 +448,15 @@ button { font: inherit; color: inherit; }
   max-width: 280px;
   padding: 7px 10px 8px;
   border-radius: var(--r-2);
-  background: #1a1613;
-  background-image: linear-gradient(180deg, rgba(255, 243, 228, 0.045), transparent 60%);
+  background: var(--tip-bg);
   box-shadow:
-    inset 0 0 0 1px rgba(224, 161, 99, 0.22),
-    0 8px 22px rgba(0, 0, 0, 0.62),
-    0 1px 0 rgba(255, 243, 228, 0.05);
-  color: #ded3c6;
+    inset 0 0 0 1px var(--tip-border),
+    0 8px 22px rgba(0, 0, 0, 0.36);
+  color: var(--tip-text);
   font-family: var(--font-ui);
   font-size: 11.5px;
-  line-height: 1.62;
-  letter-spacing: 0.015em;
+  line-height: 1.55;
+  letter-spacing: 0.01em;
   white-space: normal;
   text-align: left;
   pointer-events: none;
@@ -337,9 +476,9 @@ button { font: inherit; color: inherit; }
   width: 7px;
   height: 7px;
   margin-left: -3.5px;
-  background: #1a1613;
-  border-right: 1px solid rgba(224, 161, 99, 0.22);
-  border-bottom: 1px solid rgba(224, 161, 99, 0.22);
+  background: var(--tip-bg);
+  border-right: 1px solid var(--tip-border);
+  border-bottom: 1px solid var(--tip-border);
   transform: rotate(45deg);
   bottom: -4px;
 }
@@ -347,6 +486,6 @@ button { font: inherit; color: inherit; }
   bottom: auto;
   top: -4px;
   border: 0;
-  border-left: 1px solid rgba(224, 161, 99, 0.22);
-  border-top: 1px solid rgba(224, 161, 99, 0.22);
+  border-left: 1px solid var(--tip-border);
+  border-top: 1px solid var(--tip-border);
 }

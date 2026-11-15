@@ -1,4 +1,4 @@
-"""PhotoLab 入口。
+"""FernLens 入口。
 
 用法：
     python main.py                启动
@@ -26,8 +26,8 @@ def main():
     from PySide6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
-    app.setApplicationName("PhotoLab")
-    app.setOrganizationName("PhotoLab")
+    app.setApplicationName("FernLens")
+    app.setOrganizationName("FernLens")
 
     from ui_widgets import apply_dark_theme
     from ui_window import MainWindow

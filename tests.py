@@ -1,4 +1,4 @@
-"""PhotoLab 自检。
+"""FernLens 自检。
 
 用法：
     python tests.py              # 核心算法自检（无需 Qt）
@@ -13,7 +13,7 @@ RUN_UI = "--ui" in sys.argv
 
 if RUN_UI:                                   # 必须在导入 Qt 之前设置
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    os.environ.setdefault("PHOTOLAB_SYNC", "1")
+    os.environ.setdefault("FERNLENS_SYNC", "1")
 
 # Windows 控制台默认 GBK，避免中文/符号输出报 UnicodeEncodeError
 for _stream in (sys.stdout, sys.stderr):
@@ -502,7 +502,8 @@ def test_ai_mask():
     # ---- auto 层：配置解析 ----
 
     import os
-    envs = ("PHOTOLAB_AI_BASE_URL", "PHOTOLAB_AI_KEY", "PHOTOLAB_AI_MODEL")
+    envs = ("FERNLENS_AI_BASE_URL", "FERNLENS_AI_KEY", "FERNLENS_AI_MODEL",
+            "PHOTOLAB_AI_BASE_URL", "PHOTOLAB_AI_KEY", "PHOTOLAB_AI_MODEL")
     saved = {k: os.environ.get(k) for k in envs}
     try:
         for k in envs:
@@ -511,8 +512,8 @@ def test_ai_mask():
         check("AI 配置:UI 传入优先",
               auto.resolve_config({"base_url": "http://x/v1/", "api_key": "k",
                                    "model": "m"}) == ("http://x/v1", "k", "m"))
-        os.environ.update({"PHOTOLAB_AI_BASE_URL": "http://env", "PHOTOLAB_AI_KEY": "ek",
-                           "PHOTOLAB_AI_MODEL": "em"})
+        os.environ.update({"FERNLENS_AI_BASE_URL": "http://env", "FERNLENS_AI_KEY": "ek",
+                           "FERNLENS_AI_MODEL": "em"})
         check("AI 配置:环境变量后备", auto.resolve_config(None) == ("http://env", "ek", "em"))
         check("AI 配置:UI 传入覆盖环境变量",
               auto.resolve_config({"base_url": "http://x", "api_key": "k",

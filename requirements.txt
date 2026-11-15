@@ -1,4 +1,4 @@
-# PhotoLab 依赖
+# FernLens 依赖
 # 核心运行时（server.py / core.py / auto.py / segment.py 必需）
 PySide6>=6.6,<7
 numpy>=1.26,<3

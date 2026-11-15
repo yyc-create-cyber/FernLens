@@ -8,14 +8,17 @@
  *  - 径向：中心/长轴/短轴缩放/旋转手柄。
  *  缩放平移/快捷键对照旧 PreviewWidget：0/1/+/-、双击适应、滚轮以光标为中心。 */
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useEditor, imagePicked, setStampSource, applyStampAt,
+import { useEditor, imagePicked, pickDofFocusAt, setStampSourcePt, stampBrushRadiusNorm,
+         adjustStampSize, applyStampStroke,
          maskGeometryChanged, maskGeometryCommitted, brushStrokeCommitted,
          constrainCropRect, setLinearMaskAngle,
-         maskOverlayVisible, setMaskHover, revealMaskOverlay,
+         maskOverlayVisible,
+         confirmPolygonMask, cancelPolygonDrawing, undoPolygonPoint, clearPolygonPoints,
          setViewEdge, requestDetail } from '@/stores/editor'
 import Icon from '@/components/Icon'
+import { t, tx } from '@/lib/i18n'
+import { getCanvasPalette, themeId } from '@/lib/theme'
 import type { MaskState } from '@/api/types'
-import type { RectNorm } from '@/api/client'
 
 const store = useEditor()
 const wrap = ref<HTMLDivElement | null>(null)
@@ -36,15 +39,105 @@ type Drag =
   | { kind: 'mask-radial-scale'; index: number; axis: 'long' | 'short' }
   | { kind: 'mask-radial-rotate'; index: number }
   | { kind: 'mask-brush'; index: number; strokeIndex: number }
+  | { kind: 'mask-poly-vertex'; index: number; vertexIndex: number }
   | { kind: 'crop-move'; start: { x: number; y: number }; orig: CropRect }
   | { kind: 'crop-handle'; handle: string; start: { x: number; y: number }; orig: CropRect }
-  | { kind: 'stamp-src'; start: { x: number; y: number }; rect?: RectNorm }
-  | { kind: 'stamp-dst'; start: { x: number; y: number }; cur: { x: number; y: number } }
+  | { kind: 'stamp-brush'; srcStart: [number, number]; dstStart: [number, number]; points: [number, number][] }
 
 let drag: Drag | null = null
 let dragMoved = 0
 let mouseImg: { x: number; y: number } | null = null
-let dstRectPreview: { a: { x: number; y: number }; b: { x: number; y: number } } | null = null
+let stampMaskCv: HTMLCanvasElement | null = null
+let stampPatchCv: HTMLCanvasElement | null = null
+let altDown = false
+
+function drawCrosshair(ctx: CanvasRenderingContext2D, x: number, y: number, color: string, label?: string): void {
+  ctx.save()
+  ctx.strokeStyle = 'rgba(0,0,0,0.75)'
+  ctx.lineWidth = 3
+  ctx.beginPath()
+  ctx.moveTo(x - 9, y); ctx.lineTo(x + 9, y)
+  ctx.moveTo(x, y - 9); ctx.lineTo(x, y + 9)
+  ctx.stroke()
+
+  ctx.strokeStyle = color
+  ctx.lineWidth = 1.6
+  ctx.beginPath()
+  ctx.moveTo(x - 8, y); ctx.lineTo(x + 8, y)
+  ctx.moveTo(x, y - 8); ctx.lineTo(x, y + 8)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.arc(x, y, 4.5, 0, Math.PI * 2)
+  ctx.stroke()
+
+  if (label) {
+    ctx.font = '600 10px sans-serif'
+    ctx.fillStyle = 'rgba(0,0,0,0.68)'
+    ctx.fillRect(x + 10, y - 15, ctx.measureText(label).width + 8, 15)
+    ctx.fillStyle = color
+    ctx.fillText(label, x + 14, y - 4)
+  }
+  ctx.restore()
+}
+
+function updateStampPreviewCanvas(
+  cw: number,
+  ch: number,
+  d: { bmp: ImageBitmap; w: number; h: number },
+  stroke: Extract<Drag, { kind: 'stamp-brush' }>,
+): void {
+  if (!stampMaskCv) stampMaskCv = document.createElement('canvas')
+  if (!stampPatchCv) stampPatchCv = document.createElement('canvas')
+  if (stampMaskCv.width !== cw || stampMaskCv.height !== ch) {
+    stampMaskCv.width = cw
+    stampMaskCv.height = ch
+  }
+  if (stampPatchCv.width !== cw || stampPatchCv.height !== ch) {
+    stampPatchCv.width = cw
+    stampPatchCv.height = ch
+  }
+  const mctx = stampMaskCv.getContext('2d')!
+  const pctx = stampPatchCv.getContext('2d')!
+  mctx.clearRect(0, 0, cw, ch)
+  pctx.clearRect(0, 0, cw, ch)
+
+  const { z, ox, oy } = curTransform()
+  const rPx = Math.max(2, stampBrushRadiusNorm() * Math.min(d.w, d.h) * z)
+  const feather = Math.max(0, Math.min(1, store.stampFeather / 100))
+  const inner = Math.max(0, 1 - feather)
+
+  // Interpolate points cleanly so rapid mouse movement leaves a continuous stroke
+  const pts = stroke.points
+  mctx.globalCompositeOperation = 'lighten'
+  for (let i = 0; i < pts.length; i++) {
+    const p0 = i === 0 ? pts[0] : pts[i - 1]
+    const p1 = pts[i]
+    const s0 = imgToScreen(p0[0] * d.w, p0[1] * d.h)
+    const s1 = imgToScreen(p1[0] * d.w, p1[1] * d.h)
+    const distPx = Math.hypot(s1.x - s0.x, s1.y - s0.y)
+    const steps = Math.max(1, Math.ceil(distPx / Math.max(1.5, rPx * 0.25)))
+    for (let k = 0; k <= steps; k++) {
+      const tStep = steps === 0 ? 1 : k / steps
+      const cx = s0.x + (s1.x - s0.x) * tStep
+      const cy = s0.y + (s1.y - s0.y) * tStep
+      const g = mctx.createRadialGradient(cx, cy, rPx * inner * 0.85, cx, cy, rPx)
+      g.addColorStop(0, 'rgba(255,255,255,1)')
+      g.addColorStop(1, 'rgba(255,255,255,0)')
+      mctx.fillStyle = g
+      mctx.beginPath()
+      mctx.arc(cx, cy, rPx, 0, Math.PI * 2)
+      mctx.fill()
+    }
+  }
+
+  const dxScreen = (stroke.dstStart[0] - stroke.srcStart[0]) * d.w * z
+  const dyScreen = (stroke.dstStart[1] - stroke.srcStart[1]) * d.h * z
+  pctx.globalCompositeOperation = 'source-over'
+  pctx.drawImage(d.bmp, ox + dxScreen, oy + dyScreen, d.w * z, d.h * z)
+  pctx.globalCompositeOperation = 'destination-in'
+  pctx.drawImage(stampMaskCv, 0, 0)
+  pctx.globalCompositeOperation = 'source-over'
+}
 
 // ------------------------------------------------------------ 帧选择与变换
 function displayFrame(): { bmp: ImageBitmap; w: number; h: number } | null {
@@ -129,6 +222,12 @@ function maskPinPoint(m: MaskState, d: { w: number; h: number }): { x: number; y
     return { x: (m.x1 + m.x2) / 2 * d.w, y: (m.y1 + m.y2) / 2 * d.h }
   }
   if (m.kind === 'radial') return { x: m.cx * d.w, y: m.cy * d.h }
+  if (m.kind === 'polygon') {
+    if (!m.points.length) return { x: d.w / 2, y: d.h / 2 }
+    let sx = 0, sy = 0
+    for (const [x, y] of m.points) { sx += x; sy += y }
+    return { x: sx / m.points.length * d.w, y: sy / m.points.length * d.h }
+  }
   if (m.kind === 'ai') {
     // 网格质心（全 0 时回退中心）
     let sx = 0, sy = 0, n = 0
@@ -152,11 +251,13 @@ function maskPinPoint(m: MaskState, d: { w: number; h: number }): { x: number; y
 const aiCanvasCache = new WeakMap<object, { sig: string; canvas: HTMLCanvasElement }>()
 const pngImageCache = new Map<string, HTMLImageElement>()
 
-/** 红色叠加强度（alpha）：0.30 → 0.50，小模型硬边蒙版也能看清边界。 */
-const TINT_ALPHA = 128
+/** 红色叠加强度（alpha）：统一 0..255 与 rgba(255,56,56,0.42)。 */
+const TINT_ALPHA_NORM = 0.42
+const TINT_ALPHA = Math.round(255 * TINT_ALPHA_NORM)
+let maskTintCv: HTMLCanvasElement | null = null
 
-/** 任意掩码来源 -> 红色着色画布（掩码亮度 -> alpha）。 */
-function tintMask(src: CanvasImageSource, w: number, h: number): HTMLCanvasElement {
+/** 任意掩码来源 -> 红色着色画布（掩码亮度 -> alpha，支持反向）。 */
+function tintMask(src: CanvasImageSource, w: number, h: number, invert = false): HTMLCanvasElement {
   const c = document.createElement('canvas')
   c.width = w
   c.height = h
@@ -164,7 +265,7 @@ function tintMask(src: CanvasImageSource, w: number, h: number): HTMLCanvasEleme
   ctx.drawImage(src, 0, 0, w, h)
   const data = ctx.getImageData(0, 0, w, h)
   for (let k = 0; k < w * h; k++) {
-    const v = data.data[k * 4]
+    const v = invert ? 255 - data.data[k * 4] : data.data[k * 4]
     data.data[k * 4] = 255
     data.data[k * 4 + 1] = 56
     data.data[k * 4 + 2] = 56
@@ -175,9 +276,10 @@ function tintMask(src: CanvasImageSource, w: number, h: number): HTMLCanvasEleme
 }
 
 function aiMaskCanvas(m: MaskState): HTMLCanvasElement | null {
+  const inv = m.invert ? 1 : 0
   // ---- 像素级掩码（本地 SAM2）----
   if (m.mask_png && m.mask_w > 0 && m.mask_h > 0) {
-    const sig = `png:${m.mask_w}x${m.mask_h}:${m.mask_png.length}:${m.mask_png.slice(-48)}`
+    const sig = `png:${m.mask_w}x${m.mask_h}:${inv}:${m.mask_png.length}:${m.mask_png.slice(-48)}`
     const hit = aiCanvasCache.get(m)
     if (hit && hit.sig === sig) return hit.canvas
     let img = pngImageCache.get(sig)
@@ -189,13 +291,13 @@ function aiMaskCanvas(m: MaskState): HTMLCanvasElement | null {
       return null                                    // 首帧未解码，先不画
     }
     if (!img.complete || !img.naturalWidth) return null
-    const canvas = tintMask(img, m.mask_w, m.mask_h)
+    const canvas = tintMask(img, m.mask_w, m.mask_h, m.invert)
     aiCanvasCache.set(m, { sig, canvas })
     return canvas
   }
   // ---- VLM 网格 ----
   if (m.grid_w <= 0 || m.grid_h <= 0 || !m.grid.length) return null
-  const sig = `grid:${m.grid_w}x${m.grid_h}:${m.grid.join('')}`
+  const sig = `grid:${m.grid_w}x${m.grid_h}:${inv}:${m.grid.join('')}`
   const hit = aiCanvasCache.get(m)
   if (hit && hit.sig === sig) return hit.canvas
   const c = document.createElement('canvas')
@@ -208,15 +310,147 @@ function aiMaskCanvas(m: MaskState): HTMLCanvasElement | null {
     const row = m.grid[j] || ''
     for (let i = 0; i < m.grid_w; i++) {
       const k = (j * m.grid_w + i) * 4
-      if (row[i] === '1') {
+      const active = m.invert ? row[i] !== '1' : row[i] === '1'
+      if (active) {
         img.data[k] = 255; img.data[k + 1] = 56; img.data[k + 2] = 56
-        img.data[k + 3] = TINT_ALPHA        // ≈ 0.50，与像素级涂色一致
+        img.data[k + 3] = TINT_ALPHA
       }
     }
   }
   ctx.putImageData(img, 0, 0)
   aiCanvasCache.set(m, { sig, canvas: c })
   return c
+}
+
+/** 离屏绘制可羽化/反向的软边红色遮罩（画笔 & 自定义多边形共用）。 */
+function drawSoftMaskTint(
+  ctx: CanvasRenderingContext2D,
+  d: { w: number; h: number },
+  m: MaskState,
+  drawWhiteShape: (tctx: CanvasRenderingContext2D) => void,
+): void {
+  const el = wrap.value
+  if (!el) return
+  const cw = Math.max(1, Math.round(el.clientWidth))
+  const ch = Math.max(1, Math.round(el.clientHeight))
+  if (!maskTintCv) maskTintCv = document.createElement('canvas')
+  if (maskTintCv.width !== cw || maskTintCv.height !== ch) {
+    maskTintCv.width = cw
+    maskTintCv.height = ch
+  }
+  const tctx = maskTintCv.getContext('2d')!
+  tctx.setTransform(1, 0, 0, 1, 0, 0)
+  tctx.globalCompositeOperation = 'source-over'
+  tctx.filter = 'none'
+  tctx.clearRect(0, 0, cw, ch)
+
+  const z = curTransform().z
+  const fpx = Math.min(m.feather / 100 * shortSide(d) * 0.15, 160) * z
+  const blurPx = Math.min(80, fpx * 0.55)
+  if ('filter' in tctx && blurPx >= 0.5) {
+    tctx.filter = `blur(${blurPx.toFixed(1)}px)`
+  }
+  tctx.fillStyle = '#ffffff'
+  tctx.strokeStyle = '#ffffff'
+  drawWhiteShape(tctx)
+
+  tctx.filter = 'none'
+  tctx.globalCompositeOperation = m.invert ? 'source-out' : 'source-in'
+  tctx.fillStyle = '#ff3838'
+  tctx.fillRect(0, 0, cw, ch)
+  tctx.globalCompositeOperation = 'source-over'
+
+  ctx.save()
+  clipToImage(ctx, d)
+  ctx.globalAlpha = TINT_ALPHA_NORM
+  ctx.drawImage(maskTintCv, 0, 0, cw, ch)
+  ctx.restore()
+}
+
+function tintRgba(alpha01: number): string {
+  const a = Math.max(0, Math.min(1, alpha01)) * TINT_ALPHA_NORM
+  return `rgba(255,56,56,${a.toFixed(3)})`
+}
+
+/** 线性渐变红色覆盖预览（精确对应 core._linear_mask 的 smoothstep + feather + invert）。 */
+function drawLinearMaskTint(
+  ctx: CanvasRenderingContext2D,
+  d: { w: number; h: number },
+  m: MaskState,
+  g: ReturnType<typeof linearGeom>,
+  z: number,
+): void {
+  const s1 = imgToScreen(g.p1.x, g.p1.y)
+  const lenS = g.len * z
+  const fpxS = m.feather / 100 * lenS * 0.5
+  const halfS = Math.max(lenS - 2 * fpxS, 0) / 2
+  const spanS = lenS - 2 * halfS
+  const { ox, oy } = curTransform()
+  const gx0 = s1.x + g.u.x * halfS
+  const gy0 = s1.y + g.u.y * halfS
+  const gx1 = s1.x + g.u.x * (halfS + Math.max(spanS, 1))
+  const gy1 = s1.y + g.u.y * (halfS + Math.max(spanS, 1))
+  const grad = ctx.createLinearGradient(gx0, gy0, gx1, gy1)
+  const stops = spanS < 1
+    ? [[0, 0], [0.499, 0], [0.501, 1], [1, 1]]
+    : [[0, 0], [0.25, 0.15625], [0.5, 0.5], [0.75, 0.84375], [1, 1]]
+  for (const [pos, val] of stops) {
+    grad.addColorStop(pos, tintRgba(m.invert ? 1 - val : val))
+  }
+  ctx.save()
+  clipToImage(ctx, d)
+  ctx.fillStyle = grad
+  ctx.fillRect(ox, oy, d.w * z, d.h * z)
+  ctx.restore()
+}
+
+/** 径向渐变红色覆盖预览（精确对应 core._radial_mask 的 smoothstep + feather + invert）。 */
+function drawRadialMaskTint(
+  ctx: CanvasRenderingContext2D,
+  d: { w: number; h: number },
+  m: MaskState,
+  g: ReturnType<typeof radialGeom>,
+  z: number,
+): void {
+  const c = imgToScreen(g.cx, g.cy)
+  const f = Math.min(1, Math.max(0, m.feather / 100))
+  const r0 = Math.max(0, 1 - f)
+  ctx.save()
+  clipToImage(ctx, d)
+  ctx.translate(c.x, c.y)
+  ctx.rotate(g.angRad)
+  ctx.scale(Math.max(g.rx * z, 1e-3), Math.max(g.ry * z, 1e-3))
+
+  if (f <= 0.001) {
+    ctx.fillStyle = tintRgba(1)
+    if (!m.invert) {
+      ctx.beginPath()
+      ctx.arc(0, 0, 1, 0, Math.PI * 2)
+      ctx.fill()
+    } else {
+      const maxR = Math.hypot(d.w * z, d.h * z) / Math.max(Math.min(g.rx, g.ry) * z, 1e-3) + 2
+      ctx.beginPath()
+      ctx.rect(-maxR, -maxR, maxR * 2, maxR * 2)
+      ctx.arc(0, 0, 1, 0, Math.PI * 2, true)
+      ctx.fill()
+    }
+  } else {
+    const grad = ctx.createRadialGradient(0, 0, r0, 0, 0, 1)
+    const stops = [[0, 1], [0.25, 0.84375], [0.5, 0.5], [0.75, 0.15625], [1, 0]]
+    for (const [pos, val] of stops) {
+      grad.addColorStop(pos, tintRgba(m.invert ? 1 - val : val))
+    }
+    ctx.fillStyle = grad
+    if (!m.invert) {
+      ctx.beginPath()
+      ctx.arc(0, 0, 1, 0, Math.PI * 2)
+      ctx.fill()
+    } else {
+      const maxR = Math.hypot(d.w * z, d.h * z) / Math.max(Math.min(g.rx, g.ry) * z, 1e-3) + 2
+      ctx.fillRect(-maxR, -maxR, maxR * 2, maxR * 2)
+    }
+  }
+  ctx.restore()
 }
 
 function drawPin(ctx: CanvasRenderingContext2D, index: number, imgPt: { x: number; y: number }): void {
@@ -253,11 +487,15 @@ function drawMaskOverlay(ctx: CanvasRenderingContext2D, d: { w: number; h: numbe
     if (!m.enabled) continue
     const selected = i === store.maskSelected && store.editMode === 'mask'
     const showOverlay = selected && store.maskOverlay          // 几何手柄：选中即可见
-    const showTint = selected && maskOverlayVisible()          // 红色涂色：悬停/预览时短显
+    const showTint = selected && maskOverlayVisible()          // 红色氛围：选中始终显示，调参/退出时不显示
 
     if (m.kind === 'linear') {
-      if (!showOverlay) { drawPin(ctx, i, maskPinPoint(m, d)); continue }
       const g = linearGeom(m, d)
+      if (showTint) drawLinearMaskTint(ctx, d, m, g, z)
+      if (!showOverlay) {
+        if (!showTint) drawPin(ctx, i, maskPinPoint(m, d))
+        continue
+      }
       ctx.save()
       clipToImage(ctx, d)
       ctx.strokeStyle = 'rgba(255,255,255,0.92)'
@@ -278,8 +516,12 @@ function drawMaskOverlay(ctx: CanvasRenderingContext2D, d: { w: number; h: numbe
       const rh = imgToScreen(g.p2.x + g.u.x * 26 / z, g.p2.y + g.u.y * 26 / z)
       drawHandle(ctx, rh.x, rh.y, '#f0a030')
     } else if (m.kind === 'radial') {
-      if (!showOverlay) { drawPin(ctx, i, maskPinPoint(m, d)); continue }
       const g = radialGeom(m, d)
+      if (showTint) drawRadialMaskTint(ctx, d, m, g, z)
+      if (!showOverlay) {
+        if (!showTint) drawPin(ctx, i, maskPinPoint(m, d))
+        continue
+      }
       const c = imgToScreen(g.cx, g.cy)
       ctx.strokeStyle = '#e2e2e2'
       ctx.lineWidth = 1.6
@@ -294,8 +536,64 @@ function drawMaskOverlay(ctx: CanvasRenderingContext2D, d: { w: number; h: numbe
       drawHandle(ctx, longP.x, longP.y, '#4a9eff')
       drawHandle(ctx, shortP.x, shortP.y, '#4a9eff')
       drawHandle(ctx, rotP.x, rotP.y, '#f0a030')
+    } else if (m.kind === 'polygon') {
+      const isDrawing = selected && store.polyDrawing
+      const pts = m.points || []
+      if ((showTint || (isDrawing && store.maskOverlay)) && pts.length >= 3) {
+        drawSoftMaskTint(ctx, d, m, (tctx) => {
+          tctx.beginPath()
+          pts.forEach(([nx, ny], k) => {
+            const p = imgToScreen(nx * d.w, ny * d.h)
+            if (k === 0) tctx.moveTo(p.x, p.y); else tctx.lineTo(p.x, p.y)
+          })
+          tctx.closePath()
+          tctx.fill()
+        })
+      }
+      if (isDrawing || showOverlay) {
+        if (pts.length) {
+          ctx.save()
+          ctx.strokeStyle = 'rgba(255,255,255,0.92)'
+          ctx.lineWidth = 1.6
+          ctx.beginPath()
+          pts.forEach(([nx, ny], k) => {
+            const p = imgToScreen(nx * d.w, ny * d.h)
+            if (k === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y)
+          })
+          if (!isDrawing && pts.length >= 3) ctx.closePath()
+          ctx.stroke()
+
+          if (isDrawing && mouseImg) {
+            const last = imgToScreen(pts[pts.length - 1][0] * d.w, pts[pts.length - 1][1] * d.h)
+            const cur = imgToScreen(mouseImg.x, mouseImg.y)
+            ctx.setLineDash([4, 4])
+            ctx.strokeStyle = 'rgba(255,255,255,0.72)'
+            ctx.beginPath()
+            ctx.moveTo(last.x, last.y)
+            ctx.lineTo(cur.x, cur.y)
+            if (pts.length >= 2) {
+              const first = imgToScreen(pts[0][0] * d.w, pts[0][1] * d.h)
+              ctx.lineTo(first.x, first.y)
+            }
+            ctx.stroke()
+            ctx.setLineDash([])
+          }
+          ctx.restore()
+
+          const nearStart = isDrawing && pts.length >= 3 && mouseImg
+            && dist(mouseImg, { x: pts[0][0] * d.w, y: pts[0][1] * d.h }) < (12 / z)
+          pts.forEach(([nx, ny], k) => {
+            const p = imgToScreen(nx * d.w, ny * d.h)
+            const color = k === 0 && isDrawing && pts.length >= 3
+              ? (nearStart ? '#34d399' : '#f0a030')
+              : '#e2e2e2'
+            drawHandle(ctx, p.x, p.y, color)
+          })
+        }
+      } else if (!showTint && pts.length) {
+        drawPin(ctx, i, maskPinPoint(m, d))
+      }
     } else if (m.kind === 'ai') {
-      // AI 蒙版：悬停蒙版条目/刚创建时短显红色叠加（网格放大即软边预览）
       if (showTint) {
         const src = aiMaskCanvas(m)
         if (src) {
@@ -310,32 +608,30 @@ function drawMaskOverlay(ctx: CanvasRenderingContext2D, d: { w: number; h: numbe
       }
       if (!showTint) drawPin(ctx, i, maskPinPoint(m, d))
     } else {
-      // 画笔：正在涂/悬停时显示实际涂刷区域（低透明度，不遮挡画面）
-      if (showTint && m.strokes.length) {
+      // 画笔：选中始终显示红色半透明氛围，调参/退出时不显示
+      if (showTint && (m.strokes.length || m.invert)) {
         const radius = m.size / 100 * shortSide(d) * 0.5
-        ctx.save()
-        clipToImage(ctx, d)
-        ctx.strokeStyle = 'rgba(255,56,56,0.42)'
-        ctx.lineCap = 'round'
-        ctx.lineJoin = 'round'
-        ctx.lineWidth = Math.max(3, radius * 2 * z)
-        for (const stroke of m.strokes) {
-          if (!stroke.length) continue
-          ctx.beginPath()
-          stroke.forEach(([nx, ny], k) => {
-            const p = imgToScreen(nx * d.w, ny * d.h)
-            if (k === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y)
-          })
-          if (stroke.length === 1) {
-            const p = imgToScreen(stroke[0][0] * d.w, stroke[0][1] * d.h)
-            ctx.lineTo(p.x + 0.01, p.y)
+        drawSoftMaskTint(ctx, d, m, (tctx) => {
+          tctx.lineCap = 'round'
+          tctx.lineJoin = 'round'
+          tctx.lineWidth = Math.max(3, radius * 2 * z)
+          for (const stroke of m.strokes) {
+            if (!stroke.length) continue
+            tctx.beginPath()
+            stroke.forEach(([nx, ny], k) => {
+              const p = imgToScreen(nx * d.w, ny * d.h)
+              if (k === 0) tctx.moveTo(p.x, p.y); else tctx.lineTo(p.x, p.y)
+            })
+            if (stroke.length === 1) {
+              const p = imgToScreen(stroke[0][0] * d.w, stroke[0][1] * d.h)
+              tctx.lineTo(p.x + 0.01, p.y)
+            }
+            tctx.stroke()
           }
-          ctx.stroke()
-        }
-        ctx.restore()
+        })
       }
       if (selected) {
-        if (mouseImg && showTint) {
+        if (mouseImg && (showTint || showOverlay)) {
           const p = imgToScreen(mouseImg.x, mouseImg.y)
           const r = (m.size / 100 * shortSide(d) * 0.5) * z
           ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(3, r), 0, Math.PI * 2)
@@ -452,7 +748,8 @@ function redraw(): void {
   }
   const ctx = cv.getContext('2d')!
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.fillStyle = '#0a0c10'
+  const pal = getCanvasPalette(themeId.value)
+  ctx.fillStyle = pal.viewportBg
   ctx.fillRect(0, 0, cw, ch)
   const d = displayFrame()
   if (!d) return
@@ -474,31 +771,78 @@ function redraw(): void {
     ctx.drawImage(d.bmp, ox, oy, d.w * z, d.h * z)
   }
 
+  // Subtle frame border so light-themed white photos on white canvas have clear edges
+  if (themeId.value !== 'dark') {
+    ctx.save()
+    ctx.strokeStyle = pal.curveBorder
+    ctx.lineWidth = 1
+    ctx.strokeRect(ox - 0.5, oy - 0.5, d.w * z + 1, d.h * z + 1)
+    ctx.restore()
+  }
+
+  // Real-time Photoshop clone stroke preview while dragging
+  if (store.editMode === 'stamp' && drag?.kind === 'stamp-brush') {
+    updateStampPreviewCanvas(Math.max(1, cw), Math.max(1, ch), d, drag)
+    if (stampPatchCv) {
+      ctx.save()
+      ctx.globalAlpha = Math.max(0.05, Math.min(1, store.stampOpacity / 100))
+      ctx.drawImage(stampPatchCv, 0, 0)
+      ctx.restore()
+    }
+  }
+
   if (store.adjustments.masks.length) drawMaskOverlay(ctx, d)
   if (store.editMode === 'crop' && store.cropRect) drawCropOverlay(ctx, d)
   if (store.editMode === 'stamp') {
-    if (store.stampSource) {
-      const s = store.stampSource
-      const p0 = imgToScreen(s[0] * d.w, s[1] * d.h)
-      const p1 = imgToScreen(s[2] * d.w, s[3] * d.h)
-      ctx.strokeStyle = '#4dd07a'
-      ctx.lineWidth = 1.6
-      ctx.setLineDash([6, 4])
-      ctx.strokeRect(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y)
-      ctx.setLineDash([])
-      const cxm = (p0.x + p1.x) / 2, cym = (p0.y + p1.y) / 2
-      ctx.beginPath(); ctx.moveTo(cxm - 7, cym); ctx.lineTo(cxm + 7, cym)
-      ctx.moveTo(cxm, cym - 7); ctx.lineTo(cxm, cym + 7); ctx.stroke()
+    const rPx = Math.max(3, stampBrushRadiusNorm() * Math.min(d.w, d.h) * z)
+    // Draw clone source crosshair (moves smoothly in real time during stroke or when aligned!)
+    let activeSrc: [number, number] | null = store.stampSourcePt
+    if (drag?.kind === 'stamp-brush') {
+      const curPt = drag.points[drag.points.length - 1]
+      activeSrc = [
+        drag.srcStart[0] + (curPt[0] - drag.dstStart[0]),
+        drag.srcStart[1] + (curPt[1] - drag.dstStart[1]),
+      ]
+    } else if (store.stampAligned && store.stampOffset && mouseImg) {
+      activeSrc = [
+        mouseImg.x / d.w + store.stampOffset[0],
+        mouseImg.y / d.h + store.stampOffset[1],
+      ]
     }
-    if (dstRectPreview) {
-      ctx.strokeStyle = '#e2e2e2'
-      ctx.lineWidth = 1.4
-      ctx.strokeRect(
-        Math.min(dstRectPreview.a.x, dstRectPreview.b.x),
-        Math.min(dstRectPreview.a.y, dstRectPreview.b.y),
-        Math.abs(dstRectPreview.b.x - dstRectPreview.a.x),
-        Math.abs(dstRectPreview.b.y - dstRectPreview.a.y))
+    if (activeSrc) {
+      const sp = imgToScreen(activeSrc[0] * d.w, activeSrc[1] * d.h)
+      drawCrosshair(ctx, sp.x, sp.y, '#22c55e', 'SRC')
     }
+    // Draw Photoshop-style double-ring brush cursor at pointer
+    if (mouseImg) {
+      const mp = imgToScreen(mouseImg.x, mouseImg.y)
+      if (store.stampPickingSource || altDown) {
+        drawCrosshair(ctx, mp.x, mp.y, '#38bdf8', 'PICK')
+      } else {
+        ctx.save()
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.72)'
+        ctx.lineWidth = 2.6
+        ctx.beginPath(); ctx.arc(mp.x, mp.y, rPx, 0, Math.PI * 2); ctx.stroke()
+        ctx.strokeStyle = '#ffffff'
+        ctx.lineWidth = 1.3
+        ctx.beginPath(); ctx.arc(mp.x, mp.y, rPx, 0, Math.PI * 2); ctx.stroke()
+        if (store.stampFeather > 0) {
+          const innerR = rPx * Math.max(0.15, 1 - store.stampFeather / 100)
+          ctx.setLineDash([3, 3])
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)'
+          ctx.lineWidth = 1
+          ctx.beginPath(); ctx.arc(mp.x, mp.y, innerR, 0, Math.PI * 2); ctx.stroke()
+          ctx.setLineDash([])
+        }
+        ctx.restore()
+      }
+    }
+  }
+
+  // AI 景深对焦目标标示
+  if (store.aiStudioOpen && store.dofFocusPt) {
+    const fp = imgToScreen(store.dofFocusPt[0] * d.w, store.dofFocusPt[1] * d.h)
+    drawCrosshair(ctx, fp.x, fp.y, '#34d399', 'FOCUS')
   }
 }
 
@@ -554,6 +898,12 @@ function onWheel(e: WheelEvent): void {
 }
 
 function onPointerDown(e: PointerEvent): void {
+  if (e.button === 2 && store.editMode === 'mask' && store.polyDrawing) {
+    e.preventDefault()
+    undoPolygonPoint()
+    redraw()
+    return
+  }
   if (e.button !== 0) return
   const d = displayFrame()
   if (!d) return
@@ -563,12 +913,27 @@ function onPointerDown(e: PointerEvent): void {
   const hitTol = 10 / z
 
   if (store.editMode === 'stamp') {
-    canvas.value!.setPointerCapture(e.pointerId)
-    if (e.altKey) drag = { kind: 'stamp-src', start: lp }
-    else {
-      drag = { kind: 'stamp-dst', start: lp, cur: lp }
-      dstRectPreview = { a: lp, b: lp }
+    const img = screenToImg(lp.x, lp.y)
+    const pt: [number, number] = [img.x / d.w, img.y / d.h]
+    if (e.altKey || store.stampPickingSource) {
+      setStampSourcePt(pt)
+      redraw()
+      return
     }
+    if (!store.stampSourcePt) {
+      store.status = tx(
+        '请先按住 Alt + 左键点击画面设取样点',
+        'Please Alt+Click on the photo first to pick a clone source',
+      )
+      return
+    }
+    const srcStart: [number, number] =
+      store.stampAligned && store.stampOffset
+        ? [pt[0] + store.stampOffset[0], pt[1] + store.stampOffset[1]]
+        : [store.stampSourcePt[0], store.stampSourcePt[1]]
+    store.stampOffset = [srcStart[0] - pt[0], srcStart[1] - pt[1]]
+    canvas.value!.setPointerCapture(e.pointerId)
+    drag = { kind: 'stamp-brush', srcStart, dstStart: pt, points: [pt] }
     redraw()
     return
   }
@@ -637,12 +1002,41 @@ function onPointerDown(e: PointerEvent): void {
         drag = { kind: 'mask-radial-center', index: idx }
         canvas.value!.setPointerCapture(e.pointerId); return
       }
+    } else if (m.kind === 'polygon') {
+      if (store.polyDrawing) {
+        if (img.x >= -20 / z && img.x <= d.w + 20 / z && img.y >= -20 / z && img.y <= d.h + 20 / z) {
+          const nx = Math.min(1, Math.max(0, img.x / d.w))
+          const ny = Math.min(1, Math.max(0, img.y / d.h))
+          if (m.points.length >= 3) {
+            const p0 = { x: m.points[0][0] * d.w, y: m.points[0][1] * d.h }
+            if (dist(img, p0) < hitTol * 1.2) {
+              confirmPolygonMask()
+              redraw()
+              return
+            }
+          }
+          const last = m.points[m.points.length - 1]
+          if (!last || dist(img, { x: last[0] * d.w, y: last[1] * d.h }) >= 4 / z) {
+            m.points.push([nx, ny])
+            redraw()
+          }
+          return
+        }
+      } else if (store.maskOverlay) {
+        for (let k = 0; k < m.points.length; k++) {
+          const vp = { x: m.points[k][0] * d.w, y: m.points[k][1] * d.h }
+          if (dist(img, vp) < hitTol) {
+            drag = { kind: 'mask-poly-vertex', index: idx, vertexIndex: k }
+            canvas.value!.setPointerCapture(e.pointerId)
+            return
+          }
+        }
+      }
     } else if (m.kind === 'brush') {
       const stroke: [number, number][] = [[img.x / d.w, img.y / d.h]]
       m.strokes.push(stroke)
       drag = { kind: 'mask-brush', index: idx, strokeIndex: m.strokes.length - 1 }
       canvas.value!.setPointerCapture(e.pointerId)
-      setMaskHover(true)             // 涂刷过程中保持红色可见
       maskGeometryChanged()
       redraw()
       return
@@ -654,14 +1048,19 @@ function onPointerDown(e: PointerEvent): void {
 }
 
 function onPointerMove(e: PointerEvent): void {
+  altDown = e.altKey
   const d = displayFrame()
   const lp = localPos(e)
   mouseImg = screenToImg(lp.x, lp.y)
 
   if (!drag) {
+    if (store.editMode === 'stamp') {
+      redraw()
+      return
+    }
     if (store.editMode === 'mask' && store.maskSelected !== null) {
       const m = store.adjustments.masks[store.maskSelected]
-      if (m?.kind === 'brush') redraw()
+      if (m?.kind === 'brush' || (m?.kind === 'polygon' && store.polyDrawing)) redraw()
     }
     return
   }
@@ -773,6 +1172,17 @@ function onPointerMove(e: PointerEvent): void {
       }
       break
     }
+    case 'mask-poly-vertex': {
+      const m = store.adjustments.masks[drag.index]
+      if (!m || !d) break
+      const img = screenToImg(lp.x, lp.y)
+      m.points[drag.vertexIndex] = [
+        Math.min(1, Math.max(0, img.x / d.w)),
+        Math.min(1, Math.max(0, img.y / d.h)),
+      ]
+      maskGeometryChanged()
+      break
+    }
     case 'crop-move':
     case 'crop-handle': {
       if (!d) break
@@ -781,19 +1191,14 @@ function onPointerMove(e: PointerEvent): void {
       applyCropDrag(drag.kind === 'crop-move' ? 'move' : drag.handle, drag.orig, dxImg, dyImg)
       break
     }
-    case 'stamp-src': {
+    case 'stamp-brush': {
       if (!d) break
-      const a = screenToImg(Math.min(lp.x, drag.start.x), Math.min(lp.y, drag.start.y))
-      const b = screenToImg(Math.max(lp.x, drag.start.x), Math.max(lp.y, drag.start.y))
-      dstRectPreview = { a: imgToScreen(a.x, a.y), b: imgToScreen(b.x, b.y) }
-      drag.rect = normRect(a, b, d)
-      redraw()
-      return
-    }
-    case 'stamp-dst': {
-      if (!d) break
-      dstRectPreview = { a: drag.start, b: lp }
-      drag.cur = lp
+      const img = screenToImg(lp.x, lp.y)
+      const pt: [number, number] = [img.x / d.w, img.y / d.h]
+      const prev = drag.points[drag.points.length - 1]
+      if (!prev || Math.hypot((pt[0] - prev[0]) * d.w, (pt[1] - prev[1]) * d.h) >= 1.5) {
+        drag.points.push(pt)
+      }
       redraw()
       return
     }
@@ -801,68 +1206,71 @@ function onPointerMove(e: PointerEvent): void {
   redraw()
 }
 
-function normRect(a: { x: number; y: number }, b: { x: number; y: number },
-                 d: { w: number; h: number }): RectNorm {
-  const x0 = Math.max(0, Math.min(a.x, b.x)) / d.w
-  const y0 = Math.max(0, Math.min(a.y, b.y)) / d.h
-  const x1 = Math.min(d.w, Math.max(a.x, b.x)) / d.w
-  const y1 = Math.min(d.h, Math.max(a.y, b.y)) / d.h
-  return [x0, y0, x1, y1]
-}
-
 function onPointerUp(e: PointerEvent): void {
+  altDown = e.altKey
   if (!drag) {
     canvas.value?.releasePointerCapture(e.pointerId)
     return
   }
   const d = displayFrame()
-  if (drag.kind === 'pan' && dragMoved < 4 && store.pickTarget !== null && d) {
+  if (drag.kind === 'pan' && dragMoved < 4 && store.dofPicking && d) {
+    const lp = localPos(e)
+    const p = screenToImg(lp.x, lp.y)
+    if (p.x >= 0 && p.x < d.w && p.y >= 0 && p.y < d.h) {
+      void pickDofFocusAt(p.x / d.w, p.y / d.h)
+    }
+  } else if (drag.kind === 'pan' && dragMoved < 4 && store.pickTarget !== null && d) {
     const lp = localPos(e)
     const p = screenToImg(lp.x, lp.y)
     if (p.x >= 0 && p.x < d.w && p.y >= 0 && p.y < d.h) {
       void imagePicked(p.x / d.w * store.width, p.y / d.h * store.height)
     }
   }
-  if (drag.kind === 'stamp-src') {
-    const rect = drag.rect
-    if (rect && d && (rect[2] - rect[0]) * d.w > 4 && (rect[3] - rect[1]) * d.h > 4) {
-      setStampSource(rect)
-    }
-  }
-  if (drag.kind === 'stamp-dst') {
-    const a = screenToImg(Math.min(drag.start.x, drag.cur.x), Math.min(drag.start.y, drag.cur.y))
-    const b = screenToImg(Math.max(drag.start.x, drag.cur.x), Math.max(drag.start.y, drag.cur.y))
-    if (d) {
-      const rect = normRect(a, b, d)
-      if ((rect[2] - rect[0]) * d.w > 4 && (rect[3] - rect[1]) * d.h > 4) {
-        void applyStampAt(rect)
-      }
-    }
+  if (drag.kind === 'stamp-brush') {
+    const { srcStart, points } = drag
+    drag = null
+    canvas.value?.releasePointerCapture(e.pointerId)
+    redraw()
+    void applyStampStroke(srcStart, points)
+    return
   }
   if (drag.kind === 'mask-brush') brushStrokeCommitted(drag.index)
   if (drag.kind === 'mask-line' || drag.kind === 'mask-line-rotate'
       || drag.kind === 'mask-radial-center'
-      || drag.kind === 'mask-radial-scale' || drag.kind === 'mask-radial-rotate') {
+      || drag.kind === 'mask-radial-scale' || drag.kind === 'mask-radial-rotate'
+      || drag.kind === 'mask-poly-vertex') {
     maskGeometryCommitted()
   }
-  if (drag.kind.startsWith('mask-')) {
-    setMaskHover(false)              // 松手后收起叠加，调参数时不再挡画面
-    revealMaskOverlay(900)
-  }
-  dstRectPreview = null
   drag = null
   canvas.value?.releasePointerCapture(e.pointerId)
   redraw()
 }
 
-function onDblClick(): void { zoomFit() }
+function onDblClick(): void {
+  if (store.editMode === 'mask' && store.polyDrawing) {
+    const m = store.maskSelected !== null ? store.adjustments.masks[store.maskSelected] : null
+    if (m?.kind === 'polygon' && m.points.length >= 3) {
+      confirmPolygonMask()
+      redraw()
+    }
+    return
+  }
+  zoomFit()
+}
 
 function onKey(e: KeyboardEvent): void {
-  if (e.target instanceof HTMLInputElement) return
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+  if (e.key === 'Alt') { altDown = true; if (store.editMode === 'stamp') redraw() }
   if (e.key === '0') zoomFit()
   else if (e.key === '1') zoomOneToOne()
   else if (e.key === '+' || e.key === '=') zoomStep(1.25)
   else if (e.key === '-') zoomStep(0.8)
+  else if (store.editMode === 'stamp' && e.key === '[') { adjustStampSize(-4); redraw() }
+  else if (store.editMode === 'stamp' && e.key === ']') { adjustStampSize(4); redraw() }
+}
+
+function onKeyUp(e: KeyboardEvent): void {
+  if (e.key === 'Alt') { altDown = false; if (store.editMode === 'stamp') redraw() }
 }
 
 let ro: ResizeObserver | null = null
@@ -872,12 +1280,14 @@ onMounted(() => {
   ro = new ResizeObserver(() => redraw())
   ro.observe(wrap.value!)
   window.addEventListener('keydown', onKey)
+  window.addEventListener('keyup', onKeyUp)
   redraw()
 })
 
 onBeforeUnmount(() => {
   ro?.disconnect()
   window.removeEventListener('keydown', onKey)
+  window.removeEventListener('keyup', onKeyUp)
   if (detailTimer) window.clearTimeout(detailTimer)
 })
 
@@ -892,12 +1302,23 @@ watch(() => store.viewEdge, () => {
 })
 
 watch(() => store.frameVersion, () => redraw())
+watch(() => [themeId.value, store.stampSize, store.stampFeather, store.stampSourcePt, store.stampPickingSource, store.dofFocusPt, store.dofPicking, store.aiStudioOpen], () => redraw())
 watch(() => [store.editMode, store.maskSelected, store.maskOverlay,
+            store.maskAdjusting, store.activeTab, store.polyDrawing,
             store.maskHover, store.maskReveal, store.cropRect, store.comparing],
       () => redraw(), { deep: true })
+watch(() => store.maskSelected !== null ? store.adjustments.masks[store.maskSelected]?.points?.length : 0,
+      () => redraw())
+
+const activePolyPoints = computed(() => {
+  if (store.editMode !== 'mask' || !store.polyDrawing || store.maskSelected === null) return 0
+  const m = store.adjustments.masks[store.maskSelected]
+  return m?.kind === 'polygon' ? m.points.length : 0
+})
 
 const cursorClass = computed(() => {
-  if (store.pickTarget !== null || store.editMode === 'stamp') return 'cursor-cross'
+  if (store.editMode === 'stamp') return 'cursor-stamp'
+  if (store.dofPicking || store.pickTarget !== null) return 'cursor-cross'
   if (store.editMode === 'mask' || store.editMode === 'crop') return 'cursor-mode'
   return 'cursor-grab'
 })
@@ -911,15 +1332,24 @@ const cursorClass = computed(() => {
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
+      @pointerleave="() => { mouseImg = null; if (store.editMode === 'stamp') redraw() }"
       @dblclick="onDblClick"
       @contextmenu.prevent
     />
 
-    <div class="vignette" />
+    <div v-if="themeId === 'dark'" class="vignette" />
+
+    <div v-if="store.loaded && store.editMode === 'mask' && store.polyDrawing" class="poly-bar">
+      <span class="poly-count">{{ t('mask.polyStatus', { n: activePolyPoints }) }}</span>
+      <button class="mini" :disabled="activePolyPoints === 0" @click="undoPolygonPoint()">{{ t('mask.polyUndo') }}</button>
+      <button class="mini" :disabled="activePolyPoints === 0" @click="clearPolygonPoints()">{{ t('mask.polyClear') }}</button>
+      <button class="mini solid" :disabled="activePolyPoints < 3" @click="confirmPolygonMask()">{{ t('mask.polyConfirm') }}</button>
+      <button class="mini" @click="cancelPolygonDrawing()">{{ t('mask.polyCancel') }}</button>
+    </div>
 
     <div v-if="store.loaded" class="zoom-bar">
-      <button class="mini" title="适应窗口（0）" @click="zoomFit">适应</button>
-      <button class="mini" title="1:1 像素（1）" @click="zoomOneToOne">100%</button>
+      <button class="mini" :title="`${t('app.zoomFit')} (0)`" @click="zoomFit">{{ t('app.zoomFit') }}</button>
+      <button class="mini" title="1:1 (1)" @click="zoomOneToOne">100%</button>
       <span class="zoom-val num">{{ zoomPct }}%</span>
     </div>
 
@@ -927,12 +1357,12 @@ const cursorClass = computed(() => {
       <div class="hint-mark">
         <Icon name="image" :size="30" :stroke="1.1" />
       </div>
-      <p class="hint-title">PhotoLab</p>
-      <p class="hint-sub">把照片拖进窗口，或点击左上角「打开」</p>
+      <p class="hint-title">FernLens</p>
+      <p class="hint-sub">{{ t('app.dropTitle') }}</p>
       <div class="hint-keys">
-        <span><b class="kbd">Ctrl</b><b class="kbd">O</b> 打开</span>
-        <span><b class="kbd">\</b> 对比原图</span>
-        <span><b class="kbd">0</b> 适应窗口</span>
+        <span><b class="kbd">Ctrl</b><b class="kbd">O</b> {{ t('app.open') }}</span>
+        <span><b class="kbd">\</b> {{ t('app.compareHold') }}</span>
+        <span><b class="kbd">0</b> {{ t('app.zoomFit') }}</span>
       </div>
     </div>
   </div>
@@ -957,6 +1387,7 @@ canvas {
 .cursor-grab canvas:active { cursor: grabbing; }
 .cursor-cross canvas { cursor: crosshair; }
 .cursor-mode canvas { cursor: crosshair; }
+.cursor-stamp canvas { cursor: none; }
 
 /* 暗角：给画面一个轻微的“取景器”包裹感，不参与交互 */
 .vignette {
@@ -977,9 +1408,10 @@ canvas {
   gap: 4px;
   padding: 4px 7px 4px 5px;
   border-radius: 10px;
-  background: rgba(16, 14, 12, 0.82);
-  box-shadow: inset 0 0 0 1px var(--line-2), 0 8px 22px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(10px) saturate(1.1);
+  background: var(--glass-bg);
+  box-shadow: inset 0 0 0 1px var(--line-2), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   user-select: none;
 }
 .zoom-val {
@@ -990,6 +1422,36 @@ canvas {
   color: var(--text-2);
   letter-spacing: 0.04em;
   padding-right: 4px;
+}
+
+.poly-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 10px;
+  background: var(--glass-bg);
+  box-shadow: inset 0 0 0 1px var(--line-2), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  user-select: none;
+}
+.poly-count {
+  font-size: 11px;
+  color: var(--text-2);
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.poly-bar .mini.solid {
+  background: var(--accent);
+  color: #fff;
+}
+.poly-bar .mini.solid:disabled {
+  opacity: 0.4;
 }
 
 /* 空态 */
@@ -1015,7 +1477,7 @@ canvas {
   height: 62px;
   margin-bottom: 14px;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.035);
+  background: var(--surface-1);
   box-shadow: inset 0 0 0 1px var(--line);
   color: var(--text-3);
 }

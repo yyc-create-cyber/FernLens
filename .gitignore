@@ -13,7 +13,7 @@ frontend/node_modules/
 .Python
 build/*
 # 打包资产（被上面的 build/* 误伤，需要显式放行；CI 与 electron-builder 依赖这些文件）
-!build/photolab-server.spec
+!build/fernlens-server.spec
 !build/icon.ico
 !build/icon.png
 !build/entitlements.mac.plist
@@ -227,10 +227,15 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Electron 桌面版
+# Electron 桌面版与打包产物
 desktop/node_modules/
 desktop/release/
 backend-dist/
+frontend/dist/
+logs/
+*.exe
+*.dmg
+*.blockmap
 
 # PyInstaller 工作目录
 build/pyinstaller-work/
@@ -240,7 +245,7 @@ models/
 
 # 例外：以下为项目源文件（非 Python 构建产物），需纳入版本控制
 # 以便复现打包（PyInstaller spec / 应用图标 / 前端 TS 逻辑模块）
-!build/photolab-server.spec
+!build/fernlens-server.spec
 !build/icon.ico
 !frontend/src/lib/
 

@@ -110,10 +110,12 @@ onBeforeUnmount(() => { dragging.value = false })
   color: var(--text-2);
   letter-spacing: 0.02em;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .mrow-label.has-hint {
   cursor: help;
-  text-decoration: underline dotted rgba(255, 243, 228, 0.2);
+  text-decoration: underline dotted var(--line-2);
   text-underline-offset: 3px;
 }
 .mrow-label.has-hint:hover { text-decoration-color: var(--accent-line); color: var(--text); }

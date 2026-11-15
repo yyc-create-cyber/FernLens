@@ -6,6 +6,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import Icon from '@/components/Icon'
+import { t, tx } from '@/lib/i18n'
 import {
   useEditor, applyAdjustmentDict, aiConfigured, aiImageConfigured, closeAiChat, notifyCommitted,
   openAiSettings, openFiles,
@@ -46,11 +47,11 @@ const histories: Record<ChatMode, AiChatMessage[]> = {
 let seq = 0
 let controller: AbortController | null = null
 
-const modes: { key: ChatMode; label: string }[] = [
-  { key: 'chat', label: '讨论' },
-  { key: 'adjust', label: '参数' },
-  { key: 'image', label: '生图' },
-]
+const modes = computed<{ key: ChatMode; label: string }[]>(() => [
+  { key: 'chat', label: tx('讨论', 'Discuss') },
+  { key: 'adjust', label: tx('参数', 'Adjust') },
+  { key: 'image', label: tx('生图', 'Generate') },
+])
 
 const activeMessages = computed(() => messages[mode.value])
 /** 1 讨论 / 2 参数 走对话模型，3 生图 走图生图模型——两套端点各自判断。 */
@@ -104,14 +105,14 @@ function currentBitmap(original = false): ImageBitmap | null {
 function systemPrompt(kind: 'chat' | 'adjust'): string {
   if (kind === 'chat') {
     return [
-      '你是 PhotoLab 的照片讨论助手。根据随消息附上的当前渲染图和用户文字，',
+      '你是 FernLens 的照片讨论助手。根据随消息附上的当前渲染图和用户文字，',
       '进行专业、具体、可执行的摄影与调色讨论。回答中文，简洁直接，不要客套。',
       '用户问怎么调时，给出明确的方向和参数建议；不要输出 JSON，不要改图片。',
     ].join('')
   }
   const current = JSON.stringify({ ...store.adjustments, masks: undefined })
   return [
-    '你是 PhotoLab 的调色助手。根据图片和用户要求，输出一个严格的 JSON 对象。',
+    '你是 FernLens 的调色助手。根据图片和用户要求，输出一个严格的 JSON 对象。',
     '格式：{"note":"一句话说明","adjustments":{...}}。只输出 JSON，不要 markdown，不要解释。',
     `adjustments 可用字段：${TONE_FIELDS.join(', ')}；exposure 范围 -5..5，其余 -100..100，blackwhite 0..100。`,
     PARAM_SENSITIVITY,
@@ -313,10 +314,10 @@ onBeforeUnmount(() => {
 <template>
   <div v-show="store.aiChatOpen" class="ai-chat">
     <header class="ac-head">
-      <div class="ac-title"><Icon name="chat" :size="14" /> AI 助手</div>
+      <div class="ac-title"><Icon name="chat" :size="14" /> {{ t('aiChat.title') }}</div>
       <div class="ac-actions">
-        <button class="mini" title="清空当前模式的对话" @click="clearMode">清空</button>
-        <button class="mini square" title="关闭" @click="closeAiChat">
+        <button class="mini" :title="t('history.clear')" @click="clearMode">{{ t('history.clear') }}</button>
+        <button class="mini square" :title="t('aiSet.close')" @click="closeAiChat">
           <Icon name="close" :size="13" />
         </button>
       </div>
@@ -371,9 +372,9 @@ onBeforeUnmount(() => {
       />
       <div class="ac-foot">
         <span class="ac-hint">{{ hint }}</span>
-        <button v-if="!configReady" class="mini" @click="openAiSettings">去设置</button>
-        <button v-if="sending" class="mini" @click="cancel">停止</button>
-        <button class="btn solid" :disabled="!canSend" @click="send">发送</button>
+        <button v-if="!configReady" class="mini" @click="openAiSettings">{{ t('app.aiSettings') }}</button>
+        <button v-if="sending" class="mini" @click="cancel">{{ tx('停止', 'Stop') }}</button>
+        <button class="btn solid" :disabled="!canSend" @click="send">{{ tx('发送', 'Send') }}</button>
       </div>
     </div>
   </div>
@@ -391,10 +392,12 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--panel);
+  background: var(--glass-modal);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border: 1px solid var(--line-2);
   border-radius: var(--r-3);
-  box-shadow: 0 18px 55px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 18px 55px rgba(0, 0, 0, 0.35);
   overflow: hidden;
 }
 
@@ -435,7 +438,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition: background 0.14s var(--ease), color 0.14s var(--ease);
 }
-.ac-mode:hover { color: var(--text-2); background: rgba(255, 255, 255, 0.04); }
+.ac-mode:hover { color: var(--text-2); background: var(--surface-1); }
 .ac-mode.on {
   background: var(--accent-soft);
   color: var(--accent-text);

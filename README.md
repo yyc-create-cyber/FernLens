@@ -1,7 +1,7 @@
 # FernLens — 全能AI照片调色工作站
 
 > 拍了一堆好照片，想修出胶片感、电影感或大光圈虚化，却不想每次都对着几十个滑块从零折腾？  
-> **FernLens** 是一套跑在你自己电脑上的本地调色工具——不仅还原了Lightroom风格的大多数功能，还使用**AI 调色**帮你打下手：聊聊你的想法，或者丢给它一张参考剧照，剩下的滑块、曲线和色轮全都给你摆好。
+> **FernLens** 是一套跑在你自己电脑上的本地调色工具——不仅还原了Lightroom风格的大多数基础调色功能（比如曲线，蒙版，取色器等等）还使用更**AI 调色**帮你打下手：聊聊你的想法，或者丢给它一张参考剧照，剩下的滑块、曲线和色轮全都给你摆好。
 
 ---
 
@@ -52,7 +52,7 @@ start-web.bat
 
 ### 方式二：手动编译 & 启动（Windows / macOS / Linux 通吃）
 
-```bash
+```pwsh
 # 1. 建虚拟环境并安装 Python 依赖
 python -m venv .venv
 # Windows PowerShell: .\.venv\Scripts\Activate.ps1
@@ -72,9 +72,11 @@ python server.py --no-auth --port 8642 或者 start-web.ps1直接启动
 ```
 
 > 💡 想体验**带独立窗口 + 原生文件选择器**的 Electron 开发模式？在先编译好 `frontend` 并安装好 `desktop` 依赖后执行：
-> ```bash
+> ```pwsh
 > cd desktop && npm install && npm start
 > ```
+
+
 
 
 ---
@@ -108,7 +110,8 @@ chmod +x package.command
   xattr -dr com.apple.quarantine /Applications/FernLens.app
   ```
 
-（这个是Gemini说的，实际上可能不太一样，欢迎大佬补充）
+（这个是Gemini写的方法，实际上可能有点区别哈）
+
 ---
 
 ##跑一下自检（可选）
